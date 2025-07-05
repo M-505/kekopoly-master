@@ -2,6 +2,7 @@ package mongodb
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math"
@@ -161,7 +162,13 @@ func Connect(ctx context.Context, uri string, logger ...*zap.SugaredLogger) (*mo
 		SetMaxPoolSize(100).
 		SetMaxConnIdleTime(30 * time.Second).
 		SetRetryWrites(true).
-		SetRetryReads(true)
+		SetRetryReads(true).
+		SetServerSelectionTimeout(5 * time.Second).
+		SetConnectTimeout(10 * time.Second).
+		SetTLSConfig(&tls.Config{
+			InsecureSkipVerify: false,
+			MinVersion:         tls.VersionTLS12,
+		})
 
 	var client *mongo.Client
 	var err error
@@ -174,7 +181,7 @@ func Connect(ctx context.Context, uri string, logger ...*zap.SugaredLogger) (*mo
 	// Exponential backoff with jitter for retries
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Create a context with timeout for the connection
-		connCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		connCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 
 		// Attempt connection
 		client, err = mongo.Connect(connCtx, clientOptions)
@@ -182,7 +189,7 @@ func Connect(ctx context.Context, uri string, logger ...*zap.SugaredLogger) (*mo
 
 		if err == nil {
 			// Test the connection with ping
-			pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+			pingCtx, pingCancel := context.WithTimeout(ctx, 15*time.Second)
 			pingErr := client.Ping(pingCtx, readpref.Primary())
 			pingCancel()
 
