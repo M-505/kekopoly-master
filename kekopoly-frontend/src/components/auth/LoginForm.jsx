@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -19,8 +19,8 @@ import {
 } from '@chakra-ui/react';
 import { login, register } from '../../store/authSlice';
 
-const LoginForm = () => {
-  const [isLogin, setIsLogin] = useState(true);
+const LoginForm = ({ initialMode = 'login' }) => {
+  const [isLogin, setIsLogin] = useState(initialMode === 'login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [email, setEmail] = useState('');
@@ -32,6 +32,10 @@ const LoginForm = () => {
   
   const { error, loading } = useSelector((state) => state.auth);
   
+  useEffect(() => {
+    setIsLogin(initialMode === 'login');
+  }, [initialMode]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     

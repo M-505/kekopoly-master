@@ -12,6 +12,8 @@ import { setGameStarted, setGamePhase, syncGameStatus } from './store/gameSlice'
 import { clearGameStorageData } from './utils/storageUtils';
 import { v4 as uuidv4 } from 'uuid';
 import { connectSuccess } from './store/authSlice';
+import LoginForm from './components/auth/LoginForm';
+import ProtectedRoute from './components/auth/ProtectedRoute';
 
 function App() {
   const gameState = useSelector((state) => state.game);
@@ -124,70 +126,52 @@ function App() {
 
   useEffect(() => {
     setChecked(true);
-  }, []);
+  }, [dispatch, location.pathname]);
 
-  // On mount, generate a random user ID and set isAuthenticated to true
-  useEffect(() => {
-    let userId = localStorage.getItem('kekopoly_user_id');
-    if (!userId) {
-      userId = uuidv4();
-      localStorage.setItem('kekopoly_user_id', userId);
-    }
-    // Use a dummy JWT for local development
-    const dummyJwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJkZW1vIn0.dummysignature';
-    dispatch(connectSuccess({ token: dummyJwt, user: { id: userId } }));
-  }, [dispatch]);
+  // Render a loading indicator or null until the check is complete
+  if (!checked) {
+    return null; 
+  }
 
   return (
-    <Routes>
-      {/* Auth Routes */}
-      <Route path="/connect" element={<GameLobby />} />
+    <Box className="App">
+      <Routes>
+        <Route path="/login" element={<LoginForm initialMode='login' />} />
+        <Route path="/register" element={<LoginForm initialMode='register' />} />
 
-      {/* Protected Routes */}
-      <Route path="/" element={<GameLobby />} />
-
-      <Route path="/room/:roomId" element={<GameRoom />} />
-
-      <Route path="/game/:gameId" element={(() => {
-        // Get the latest state directly from the store
-        const latestState = store.getState().game;
-        const effectiveGameStarted = gameStarted || latestState.gameStarted;
-        const effectiveGamePhase = gamePhase || latestState.gamePhase;
-
-        // Also check localStorage as additional fallback
-        let localStorageGameStarted = false;
-        let storedGameId = null;
-        let navTimestamp = null;
-
-        try {
-          localStorageGameStarted = localStorage.getItem('kekopoly_game_started') === 'true';
-          storedGameId = localStorage.getItem('kekopoly_game_id');
-          navTimestamp = localStorage.getItem('kekopoly_navigation_timestamp');
-          const isTimestampRecent = navTimestamp &&
-            (Date.now() - parseInt(navTimestamp, 10) < 120000);
-          if (!isTimestampRecent) {
-            localStorageGameStarted = localStorageGameStarted && storedGameId === window.location.pathname.split('/').pop();
+        {/* Protected Routes */}
+        <Route 
+          path="/" 
+          element={
+            <ProtectedRoute>
+              <GameLobby />
+            </ProtectedRoute>
           }
-        } catch (e) {
-          console.warn('[ROUTING] Error reading localStorage:', e);
-        }
+        />
+        <Route 
+          path="/room/:gameId" 
+          element={
+            <ProtectedRoute>
+              <GameRoom />
+            </ProtectedRoute>
+          }
+        />
+        <Route 
+          path="/game/:gameId" 
+          element={
+            <ProtectedRoute>
+              <GameBoard />
+            </ProtectedRoute>
+          }
+        />
 
-        const shouldRenderGameBoard =
-          (effectiveGameStarted && effectiveGamePhase === 'playing') ||
-          localStorageGameStarted;
-
-        if (!checked) {
-          return null; // Wait for initial check
-        }
-        if (shouldRenderGameBoard) {
-          return <GameBoard />;
-        }
-        return <GameLobby />;
-      })()} />
-
-      {/* 404 Route */}
-      <Route path="*" element={<GameLobby />} />
-    </Routes>
+        {/* Redirect any other path to the lobby if authenticated, otherwise to login */}
+        <Route 
+          path="*" 
+          element={<Navigate to={isAuthenticated ? "/" : "/login"} replace />}
+        />
+      </Routes>
+    </Box>
   );
 }
 

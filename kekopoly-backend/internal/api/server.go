@@ -18,6 +18,7 @@ import (
 	"github.com/kekopoly/backend/internal/api/handlers"
 	"github.com/kekopoly/backend/internal/api/middleware/auth"
 	"github.com/kekopoly/backend/internal/config"
+	"github.com/kekopoly/backend/internal/db/mongodb"
 	"github.com/kekopoly/backend/internal/game/manager"
 	"github.com/kekopoly/backend/internal/game/websocket"
 	"github.com/kekopoly/backend/internal/queue"
@@ -56,6 +57,7 @@ type Server struct {
 	mongoClient  *mongo.Client
 	redisClient  *redis.Client
 	messageQueue *queue.RedisQueue
+	userStore    *mongodb.UserStore
 }
 
 // NewServer creates a new API server
@@ -70,6 +72,13 @@ func NewServerWithClients(cfg *config.Config, gameManager *manager.GameManager, 
 
 	// Set up validator
 	e.Validator = &CustomValidator{validator: validator.New()}
+
+	// Initialize UserStore if mongoClient is available
+	var userStore *mongodb.UserStore
+	if mongoClient != nil {
+		userStore = mongodb.NewUserStore(mongoClient.Database(cfg.MongoDB.Database))
+		logger.Info("UserStore initialized")
+	}
 
 	// Initialize Redis queue if Redis is enabled and client is available
 	var redisQueue *queue.RedisQueue
@@ -111,6 +120,7 @@ func NewServerWithClients(cfg *config.Config, gameManager *manager.GameManager, 
 		mongoClient:  mongoClient,
 		redisClient:  redisClient,
 		messageQueue: redisQueue,
+		userStore:    userStore,
 	}
 
 	// Configure middleware
@@ -211,7 +221,7 @@ func (s *Server) metricsMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 func (s *Server) configureRoutes() {
 	// Create handlers
 	gameHandler := handlers.NewGameHandler(s.gameManager, s.wsHub, s.logger)
-	authHandler := handlers.NewAuthHandler(s.cfg, s.logger)
+	authHandler := handlers.NewAuthHandler(s.cfg, s.userStore, s.logger)
 	userHandler := handlers.NewUserHandler(s.logger)
 	wsHandler := handlers.NewWebSocketHandler(s.wsHub, s.logger, s.cfg)
 	healthHandler := handlers.NewHealthHandler(s.mongoClient, s.redisClient, s.logger)

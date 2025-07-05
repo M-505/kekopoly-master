@@ -1,16 +1,35 @@
-import { createSlice } from '@reduxjs/toolkit';
+import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
+import { apiPost } from '../utils/apiUtils';
 
-// Check if token exists in localStorage
+export const login = createAsyncThunk(
+  'auth/login',
+  async (credentials, { rejectWithValue }) => {
+    try {
+      const data = await apiPost('/api/auth/login', credentials);
+      return data;
+    } catch (error) {
+      return rejectWithValue(error.toString());
+    }
+  }
+);
+
+export const register = createAsyncThunk(
+  'auth/register',
+  async (userData, { rejectWithValue }) => {
+    try {
+      const data = await apiPost('/api/auth/register', userData);
+      return data;
+    } catch (error) {
+      return rejectWithValue(error.toString());
+    }
+  }
+);
+
 const storedToken = localStorage.getItem('kekopoly_token');
-
-// Ensure the token is properly formatted with 'Bearer ' prefix
-const formattedToken = storedToken 
-  ? (storedToken.startsWith('Bearer ') ? storedToken : `Bearer ${storedToken}`)
-  : null;
 
 const initialState = {
   isAuthenticated: !!storedToken,
-  token: formattedToken,
+  token: storedToken,
   user: storedToken ? JSON.parse(localStorage.getItem('kekopoly_user') || '{}') : null,
   error: null,
   loading: false,
@@ -20,26 +39,6 @@ const authSlice = createSlice({
   name: 'auth',
   initialState,
   reducers: {
-    connectStart: (state) => {
-      state.loading = true;
-      state.error = null;
-    },
-    connectSuccess: (state, action) => {
-      state.isAuthenticated = true;
-      const token = action.payload.token.startsWith('Bearer ') 
-        ? action.payload.token 
-        : `Bearer ${action.payload.token}`;
-      state.token = token;
-      state.user = action.payload.user;
-      state.loading = false;
-      state.error = null;
-      localStorage.setItem('kekopoly_token', token);
-      localStorage.setItem('kekopoly_user', JSON.stringify(action.payload.user));
-    },
-    connectFailure: (state, action) => {
-      state.loading = false;
-      state.error = action.payload;
-    },
     disconnect: (state) => {
       state.isAuthenticated = false;
       state.token = null;
@@ -48,7 +47,42 @@ const authSlice = createSlice({
       localStorage.removeItem('kekopoly_user');
     },
   },
+  extraReducers: (builder) => {
+    builder
+      .addCase(login.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
+      .addCase(login.fulfilled, (state, action) => {
+        state.loading = false;
+        state.isAuthenticated = true;
+        state.token = action.payload.token;
+        state.user = action.payload;
+        localStorage.setItem('kekopoly_token', action.payload.token);
+        localStorage.setItem('kekopoly_user', JSON.stringify(action.payload));
+      })
+      .addCase(login.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.payload;
+      })
+      .addCase(register.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
+      .addCase(register.fulfilled, (state, action) => {
+        state.loading = false;
+        state.isAuthenticated = true;
+        state.token = action.payload.token;
+        state.user = action.payload;
+        localStorage.setItem('kekopoly_token', action.payload.token);
+        localStorage.setItem('kekopoly_user', JSON.stringify(action.payload));
+      })
+      .addCase(register.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.payload;
+      });
+  },
 });
 
-export const { connectStart, connectSuccess, connectFailure, disconnect } = authSlice.actions;
+export const { disconnect } = authSlice.actions;
 export default authSlice.reducer;

@@ -14,6 +14,8 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/connstring"
 	"go.uber.org/zap"
+
+	"github.com/kekopoly/backend/internal/config"
 )
 
 // CircuitBreaker implements the circuit breaker pattern for MongoDB
@@ -273,4 +275,34 @@ func CreateIndexes(ctx context.Context, client *mongo.Client, dbName string) err
 	// This function can be expanded to create indexes for different collections
 	// For now, it's a placeholder for future index creation
 	return nil
+}
+
+// MongoDB wraps the MongoDB client and database
+type MongoDB struct {
+	Client    *mongo.Client
+	DB        *mongo.Database
+	logger    *zap.SugaredLogger
+	cfg       *config.MongoDBConfig
+	userStore *UserStore
+}
+
+// NewMongoDB creates a new MongoDB instance
+func NewMongoDB(client *mongo.Client, db *mongo.Database, logger *zap.SugaredLogger, cfg *config.MongoDBConfig) (*MongoDB, error) {
+	return &MongoDB{
+		Client:    client,
+		DB:        db,
+		logger:    logger,
+		cfg:       cfg,
+		userStore: NewUserStore(db),
+	}, nil
+}
+
+// Disconnect closes the MongoDB connection
+func (m *MongoDB) Disconnect(ctx context.Context) error {
+	return m.Client.Disconnect(ctx)
+}
+
+// GetUserStore returns the user store
+func (m *MongoDB) GetUserStore() *UserStore {
+	return m.userStore
 }

@@ -3,7 +3,6 @@ package auth
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -21,21 +20,6 @@ type Claims struct {
 func JWTMiddleware(secret string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// DEV PATCH: Allow any token if DEV_SKIP_JWT is set
-			if devSkip := strings.ToLower(strings.TrimSpace(strings.Trim(os.Getenv("DEV_SKIP_JWT"), "\"'"))); devSkip == "1" || devSkip == "true" {
-				authHeader := c.Request().Header.Get("Authorization")
-				if authHeader == "" {
-					return echo.NewHTTPError(http.StatusUnauthorized, "missing authorization header")
-				}
-				parts := strings.Split(authHeader, " ")
-				if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-					return echo.NewHTTPError(http.StatusUnauthorized, "invalid authorization header format")
-				}
-				// Accept any token, set dummy userID
-				c.Set("userID", "dev-user")
-				return next(c)
-			}
-
 			// Extract token from Authorization header or query parameter
 			tokenString := ""
 
