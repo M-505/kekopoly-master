@@ -30,7 +30,7 @@ services:
         fromService:
           name: kekopoly-backend
           type: web
-          property: url
+          property: host  # Changed from 'url' to 'host'
     routes:
       - type: rewrite
         source: /*
