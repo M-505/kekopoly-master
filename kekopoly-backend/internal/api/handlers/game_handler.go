@@ -11,6 +11,7 @@ import (
 
 	"github.com/kekopoly/backend/internal/game/manager"
 	"github.com/kekopoly/backend/internal/game/models"
+	"github.com/kekopoly/backend/internal/game/utils"
 	"github.com/kekopoly/backend/internal/game/websocket"
 )
 
@@ -144,6 +145,7 @@ func (h *GameHandler) ListGames(c echo.Context) error {
 	// Transform the game model to a simplified response format
 	type GameResponse struct {
 		ID         string `json:"id"`
+		Code       string `json:"code"` // Room code
 		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Players    int    `json:"players"`
@@ -173,6 +175,7 @@ func (h *GameHandler) ListGames(c echo.Context) error {
 
 		gamesList = append(gamesList, GameResponse{
 			ID:         game.ID.Hex(),
+			Code:       game.Code, // Room code
 			Name:       game.Name, // Assuming there's a Name field in the game model
 			Status:     string(game.Status),
 			Players:    activePlayerCount, // Use the count of active players
@@ -451,6 +454,42 @@ func (h *GameHandler) SyncGameState(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, map[string]string{
 		"message": "Game state sync initiated",
+	})
+}
+
+// FixGamesWithoutCodes updates existing games that don't have room codes
+func (h *GameHandler) FixGamesWithoutCodes(c echo.Context) error {
+	games, err := h.gameManager.ListAvailableGames()
+	if err != nil {
+		h.logger.Errorf("Failed to get games for fixing codes: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to get games")
+	}
+
+	fixedCount := 0
+	for _, game := range games {
+		if game.Code == "" {
+			// Generate a new room code for this game
+			roomCode, err := utils.GenerateRoomCode()
+			if err != nil {
+				h.logger.Errorf("Failed to generate room code for game %s: %v", game.ID.Hex(), err)
+				continue
+			}
+
+			// Update the game with the new code
+			game.Code = roomCode
+			if err := h.gameManager.UpdateGame(game); err != nil {
+				h.logger.Errorf("Failed to update game %s with room code: %v", game.ID.Hex(), err)
+				continue
+			}
+
+			h.logger.Infof("Fixed game %s with new room code: %s", game.ID.Hex(), roomCode)
+			fixedCount++
+		}
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Fixed games without room codes",
+		"fixed":   fixedCount,
 	})
 }
 

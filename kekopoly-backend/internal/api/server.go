@@ -296,6 +296,7 @@ func (s *Server) configureRoutes() {
 	gameGroup.GET("/:gameId/state", gameHandler.GetGameState)
 	gameGroup.POST("/:gameId/sync", gameHandler.SyncGameState)
 	gameGroup.POST("/cleanup", gameHandler.CleanupStaleGames)
+	gameGroup.POST("/fix-codes", gameHandler.FixGamesWithoutCodes) // Fix for games without room codes
 
 	// Game actions routes (JWT required)
 	actionGroup := apiV1.Group("/games/:gameId/actions", jwtMiddleware)

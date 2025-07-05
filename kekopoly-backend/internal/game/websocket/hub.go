@@ -1835,8 +1835,8 @@ func (c *Client) handleMessage(message []byte) {
 					ID:             playerId,
 					CharacterToken: toStringOrDefault(playerInfo["token"], ""),
 					Status:         models.PlayerStatusConnected,
-					Balance:       1500, // Starting balance
-					Position:      0,    // Starting position
+					Balance:        1500, // Starting balance
+					Position:       0,    // Starting position
 				}
 				game.Players = append(game.Players, newPlayer)
 				err = c.hub.gameManager.UpdateGame(game)
@@ -2073,17 +2073,17 @@ func (h *Hub) HandleLobbyWebSocketConnection(conn *websocket.Conn, playerID, ses
 
 	// Create a new client for the lobby connection
 	client := &Client{
-		hub:                h,
-		conn:              conn,
-		highPriorityQueue: make(chan []byte, 256),
+		hub:                 h,
+		conn:                conn,
+		highPriorityQueue:   make(chan []byte, 256),
 		normalPriorityQueue: make(chan []byte, 256),
-		lowPriorityQueue:  make(chan []byte, 256),
-		gameID:            lobbyGameID,
-		playerID:          playerID,
-		sessionID:         sessionID,
-		lastPongTime:      time.Now(),
-		connectedAt:       time.Now(),
-		isReconnection:    false,
+		lowPriorityQueue:    make(chan []byte, 256),
+		gameID:              lobbyGameID,
+		playerID:            playerID,
+		sessionID:           sessionID,
+		lastPongTime:        time.Now(),
+		connectedAt:         time.Now(),
+		isReconnection:      false,
 	}
 
 	h.register <- client

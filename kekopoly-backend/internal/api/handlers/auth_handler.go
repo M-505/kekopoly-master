@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 
@@ -142,6 +143,23 @@ func (h *AuthHandler) Login(c echo.Context) error {
 	// Verify password hash
 	if !user.CheckPassword(req.Password) {
 		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid username or password")
+	}
+
+	// Fix for existing users with invalid/empty ObjectIDs
+	if user.ID.IsZero() || user.ID.Hex() == "000000000000000000000000" {
+		h.logger.Infof("Fixing invalid user ID for user %s", user.Username)
+
+		// Generate a new valid ObjectID
+		user.ID = primitive.NewObjectID()
+		user.UpdatedAt = time.Now()
+
+		// Update the user in the database
+		if err := h.userStore.UpdateUser(ctx, user); err != nil {
+			h.logger.Errorf("Failed to update user with new ID: %v", err)
+			// Don't fail the login, just log the error and continue with the new ID
+		} else {
+			h.logger.Infof("Successfully updated user %s with new ID: %s", user.Username, user.ID.Hex())
+		}
 	}
 
 	// Generate JWT token
