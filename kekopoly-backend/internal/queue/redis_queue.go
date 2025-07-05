@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -38,11 +39,29 @@ type RedisQueue struct {
 }
 
 // NewRedisQueue creates a new Redis queue
-func NewRedisQueue(redisURI string, logger *zap.Logger) (*RedisQueue, error) {
-	opt, err := redis.ParseURL(redisURI)
+func NewRedisQueue(configURI string, logger *zap.Logger) (*RedisQueue, error) {
+	// First try environment variable, then fallback to config
+	uri := os.Getenv("REDIS_URI")
+	if uri == "" {
+		uri = configURI
+	}
+
+	if uri == "" {
+		return nil, fmt.Errorf("redis URI not found in environment or config")
+	}
+
+	opt, err := redis.ParseURL(uri)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse Redis URI: %w", err)
 	}
+
+	// Set sensible defaults for the connection
+	opt.DialTimeout = 5 * time.Second
+	opt.ReadTimeout = 3 * time.Second
+	opt.WriteTimeout = 3 * time.Second
+	opt.PoolSize = 10
+	opt.MinIdleConns = 5
+	opt.MaxRetries = 3
 
 	client := redis.NewClient(opt)
 	ctx := context.Background()
