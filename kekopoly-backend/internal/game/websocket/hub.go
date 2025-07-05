@@ -702,6 +702,12 @@ func (h *Hub) updateGameInfoCache(gameID string) {
 		return
 	}
 
+	// Skip lobby connections - they don't represent actual games
+	if gameID == "lobby" {
+		h.logger.Debugf("Skipping game info cache update for lobby connection")
+		return
+	}
+
 	// Get game from manager
 	game, err := h.gameManager.GetGame(gameID)
 	if err != nil {
@@ -1794,7 +1800,7 @@ func (c *Client) handleMessage(message []byte) {
 		}
 
 		// Update the player in the game manager's database
-		if c.hub.gameManager != nil {
+		if c.hub.gameManager != nil && c.gameID != "lobby" {
 			// Get the game from the game manager
 			game, err := c.hub.gameManager.GetGame(c.gameID)
 			if err != nil {

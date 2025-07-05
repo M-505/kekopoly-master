@@ -1987,6 +1987,12 @@ func (gm *GameManager) RemoveGameSession(gameID string) {
 func (gm *GameManager) PlayerConnected(gameID, playerID, sessionID string) {
 	gm.logger.Debugf("[PlayerConnected] Called for game %s, player %s, session %s", gameID, playerID, sessionID)
 
+	// Handle lobby connections specially - they don't represent actual games
+	if gameID == "lobby" {
+		gm.logger.Debugf("[PlayerConnected] Lobby connection for player %s, session %s - no game session needed", playerID, sessionID)
+		return
+	}
+
 	gm.activeGamesMutex.RLock()
 	session, ok := gm.activeGames[gameID]
 	gm.activeGamesMutex.RUnlock()
