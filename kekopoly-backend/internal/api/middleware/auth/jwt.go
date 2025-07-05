@@ -38,14 +38,18 @@ func JWTMiddleware(secret string) echo.MiddlewareFunc {
 
 			// Extract token from Authorization header or query parameter
 			tokenString := ""
+
+			// 1. Try Authorization header
 			authHeader := c.Request().Header.Get("Authorization")
 			if authHeader != "" {
 				parts := strings.Split(authHeader, " ")
 				if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
 					tokenString = parts[1]
 				}
-			} else {
-				// If header is not found, check query parameter for WebSocket
+			}
+
+			// 2. If not found in header, try query parameter
+			if tokenString == "" {
 				tokenString = c.QueryParam("token")
 			}
 
