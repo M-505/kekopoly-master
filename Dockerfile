@@ -46,6 +46,21 @@ USER appuser
 # Expose the application port
 EXPOSE 8080
 
+# Document required environment variables
+# MONGODB_URI - MongoDB connection string (must start with mongodb:// or mongodb+srv://)
+# REDIS_URI - Redis connection string
+# REDIS_PASSWORD - Redis password
+ENV MONGODB_URI="" \
+    REDIS_URI="" \
+    REDIS_PASSWORD=""
+
+# Validate MongoDB URI format
+RUN if [ -z "${MONGODB_URI##mongodb://*}" ] || [ -z "${MONGODB_URI##mongodb+srv://*}" ]; then \
+    echo "MongoDB URI is properly formatted"; \
+else \
+    echo "Error: MONGODB_URI must start with mongodb:// or mongodb+srv://" && exit 1; \
+fi
+
 # Set healthcheck
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget -q -O- http://localhost:8080/health || exit 1
