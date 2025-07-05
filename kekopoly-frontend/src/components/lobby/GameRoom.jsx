@@ -269,7 +269,7 @@ const GameRoom = () => {
 
     if (!currentPlayerId || !socketService || !socketService.socket ||
         socketService.socket.readyState !== WebSocket.OPEN) {
-      // console.log('[PLAYER_DISPLAY] Cannot broadcast player info: Socket not ready or missing info', { currentPlayerId, socketReady: socketService?.socket?.readyState });
+      console.log('[PLAYER_DISPLAY] Cannot broadcast player info: Socket not ready or missing info', { currentPlayerId, socketReady: socketService?.socket?.readyState });
       return;
     }
 
@@ -282,20 +282,31 @@ const GameRoom = () => {
       dataToSend = playersInStore[currentPlayerId];
       
       if (!dataToSend) {
-        // console.log('[PLAYER_DISPLAY] No player data available in store or as parameter');
-        return;
+        // Create minimal player data as fallback
+        const playerName = localStorage.getItem(`kekopoly_player_name_${roomId}`) || 'Player';
+        const playerToken = localStorage.getItem(`kekopoly_player_token_${roomId}`) || 'pepe';
+        
+        dataToSend = {
+          id: currentPlayerId,
+          name: playerName,
+          token: playerToken,
+          isHost: false,
+          isReady: false
+        };
+        
+        console.log('[PLAYER_DISPLAY] Created fallback player data:', dataToSend);
       }
     }
-    // console.log('[PLAYER_DISPLAY] Broadcasting player info using data:', dataToSend);
+    console.log('[PLAYER_DISPLAY] Broadcasting player info using data:', dataToSend);
 
-    // Debounce checkhttps://kekopoly-master.onrender.com/room/Q4WZB2
+    // Debounce check - reduce debounce time for better responsiveness
     if (!window.lastBroadcastTime) { window.lastBroadcastTime = 0; }
-    const now = Date.now(); // Declare 'now' ONCE here
-    if (now - window.lastBroadcastTime < 2000) {
-      // console.log('[PLAYER_DISPLAY] Skipping broadcast due to debounce');
+    const now = Date.now();
+    if (now - window.lastBroadcastTime < 1000) { // Reduced from 2000ms to 1000ms
+      console.log('[PLAYER_DISPLAY] Skipping broadcast due to debounce');
       return;
     }
-    window.lastBroadcastTime = now; // Update last broadcast time using the 'now' variable
+    window.lastBroadcastTime = now;
 
     // Always try to get emoji and color from token first for consistency
     let emoji = '👤';
@@ -307,7 +318,7 @@ const GameRoom = () => {
       if (tokenData) {
         emoji = tokenData.emoji;
         color = tokenData.color;
-        // console.log(`[PLAYER_DISPLAY] Found token data for ${dataToSend.token}:`, tokenData);
+        console.log(`[PLAYER_DISPLAY] Found token data for ${dataToSend.token}:`, tokenData);
       }
     }
 
@@ -320,7 +331,7 @@ const GameRoom = () => {
       color = dataToSend.color;
     }
 
-    socketService.sendMessage('player_joined', {
+    const playerMessage = {
       player: {
         id: dataToSend.id,
         name: dataToSend.name || `Player ${dataToSend.id.substring(0, 4)}`, // Fallback
@@ -330,10 +341,21 @@ const GameRoom = () => {
         isHost: dataToSend.isHost || false,
         isReady: dataToSend.isReady || false
       }
-    });
+    };
 
-    // console.log('[PLAYER_DISPLAY] Player info broadcast complete');
-  }, [currentPlayerId, socketService]); // Dependency array remains minimal
+    console.log('[PLAYER_DISPLAY] Sending player_joined message:', playerMessage);
+    socketService.sendMessage('player_joined', playerMessage);
+
+    // After broadcasting, also request the current active players to ensure sync
+    setTimeout(() => {
+      if (socketService && socketService.socket && socketService.socket.readyState === WebSocket.OPEN) {
+        console.log('[PLAYER_DISPLAY] Requesting active players after broadcast');
+        socketService.sendMessage('get_active_players', {});
+      }
+    }, 500);
+
+    console.log('[PLAYER_DISPLAY] Player info broadcast complete');
+  }, [currentPlayerId, socketService, roomId]); // Added roomId to dependency array
 
   // Setup navigation function in window object for socketService to use
   useEffect(() => {
@@ -405,6 +427,63 @@ const GameRoom = () => {
   }, [gameStarted, gamePhase, navigate, roomId, currentPlayerId, isHost]);
 
 
+
+  // Room validation effect - check if room exists before allowing entry
+  useEffect(() => {
+    const validateRoom = async () => {
+      if (!roomId || !token) return;
+
+      try {
+        // Check if the room/game exists by calling the backend API
+        const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'}/api/v1/games/${roomId}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (!response.ok) {
+          // Room doesn't exist or error occurred
+          console.error(`Room ${roomId} not found or inaccessible:`, response.status);
+          
+          toast({
+            title: 'Room Not Found',
+            description: `The room "${roomId}" does not exist or is no longer available.`,
+            status: 'error',
+            duration: 5000,
+            isClosable: true,
+          });
+
+          // Navigate back to lobby after a short delay
+          setTimeout(() => {
+            navigate('/lobby');
+          }, 2000);
+          return;
+        }
+
+        // Room exists, we can proceed
+        console.log(`Room ${roomId} validated successfully`);
+        
+      } catch (error) {
+        console.error('Error validating room:', error);
+        
+        toast({
+          title: 'Connection Error',
+          description: 'Unable to verify room status. Please check your connection and try again.',
+          status: 'error',
+          duration: 5000,
+          isClosable: true,
+        });
+
+        // Navigate back to lobby after a short delay
+        setTimeout(() => {
+          navigate('/lobby');
+        }, 2000);
+      }
+    };
+
+    validateRoom();
+  }, [roomId, token, navigate, toast]);
 
   // Effect to initialize player connection when first joining OR reconnecting after load
   useEffect(() => {
@@ -1510,7 +1589,63 @@ const GameRoom = () => {
     }
   }, [navigate, roomId, dispatch, isHost, currentPlayerId, toast]);
 
-  // roomId is already normalized at the top of the component
+  // Enhanced player synchronization effect - ensures all players see each other
+  useEffect(() => {
+    let syncInterval;
+    
+    if (currentPlayerId && socketService && socketService.socket && 
+        socketService.socket.readyState === WebSocket.OPEN) {
+      
+      // Function to perform synchronization
+      const performSync = () => {
+        console.log('[PLAYER_SYNC] Performing player synchronization');
+        
+        // 1. Request active players list
+        socketService.sendMessage('get_active_players', {});
+        
+        // 2. Request host information
+        socketService.sendMessage('get_host', { gameId: roomId });
+        
+        // 3. Broadcast own player information
+        const currentState = store.getState();
+        const playersInStore = currentState.players.players || {};
+        const myPlayerData = playersInStore[currentPlayerId];
+        
+        if (myPlayerData) {
+          broadcastPlayerInfo(myPlayerData);
+        } else {
+          // Create and broadcast minimal player data
+          const playerName = localStorage.getItem(`kekopoly_player_name_${roomId}`) || 'Player';
+          const playerToken = localStorage.getItem(`kekopoly_player_token_${roomId}`) || 'pepe';
+          const tokenData = PLAYER_TOKENS.find(t => t.id === playerToken);
+          
+          const minimalPlayerData = {
+            id: currentPlayerId,
+            name: playerName,
+            token: playerToken,
+            emoji: tokenData ? tokenData.emoji : '👤',
+            color: tokenData ? tokenData.color : 'gray.500',
+            isHost: false,
+            isReady: false
+          };
+          
+          broadcastPlayerInfo(minimalPlayerData);
+        }
+      };
+
+      // Perform initial sync after a short delay
+      setTimeout(performSync, 1000);
+      
+      // Set up periodic sync (every 15 seconds) to ensure players stay in sync
+      syncInterval = setInterval(performSync, 15000);
+    }
+
+    return () => {
+      if (syncInterval) {
+        clearInterval(syncInterval);
+      }
+    };
+  }, [currentPlayerId, socketService?.socket?.readyState, roomId, broadcastPlayerInfo]);
 
   return (
     <Box minH="100vh" bg="gray.100">

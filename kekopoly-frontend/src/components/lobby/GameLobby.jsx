@@ -483,6 +483,32 @@ const GameLobby = () => {
     } catch (error) {
       console.error('Error joining game:', error);
       
+      // Handle specific error cases
+      let errorMessage = 'Failed to join game. Please try again.';
+      let shouldShowGenericError = true;
+      
+      // Check if the game/room doesn't exist (404 or specific error messages)
+      if (error.response?.status === 404 || 
+          error.message?.includes('Game not found') ||
+          error.message?.includes('not found') ||
+          error.message?.includes('404')) {
+        
+        errorMessage = `Game "${gameId}" not found. It may have been deleted or ended.`;
+        shouldShowGenericError = false;
+        
+        toast({
+          title: 'Game Not Found',
+          description: errorMessage,
+          status: 'error',
+          duration: 5000,
+          isClosable: true,
+        });
+        
+        // Refresh the game list to remove any stale entries
+        refreshGameList();
+        return;
+      }
+      
       // If getting game details failed, fall back to using gameId directly
       if (error.message && error.message.includes('Failed to get game details')) {
         console.warn('Falling back to gameId for navigation due to API error');
@@ -496,16 +522,37 @@ const GameLobby = () => {
           return;
         } catch (fallbackError) {
           console.error('Fallback join also failed:', fallbackError);
+          
+          // Check if fallback also indicates room doesn't exist
+          if (fallbackError.response?.status === 404) {
+            errorMessage = `Game "${gameId}" not found. It may have been deleted or ended.`;
+            shouldShowGenericError = false;
+            
+            toast({
+              title: 'Game Not Found',
+              description: errorMessage,
+              status: 'error',
+              duration: 5000,
+              isClosable: true,
+            });
+            
+            // Refresh the game list
+            refreshGameList();
+            return;
+          }
         }
       }
       
-      toast({
-        title: 'Error',
-        description: 'Failed to join game. Please try again.',
-        status: 'error',
-        duration: 3000,
-        isClosable: true,
-      });
+      // Show generic error only if no specific error was handled
+      if (shouldShowGenericError) {
+        toast({
+          title: 'Error',
+          description: errorMessage,
+          status: 'error',
+          duration: 3000,
+          isClosable: true,
+        });
+      }
     }
   };
 
