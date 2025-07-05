@@ -126,13 +126,17 @@ export function connect(gameId, playerId, token, initialPlayerData) {
     const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.hostname === 'localhost' ? 'localhost:8080' : window.location.host;
 
+    // Prepare token for URL (remove 'Bearer ' prefix when using in query parameter)
+    const urlToken = tokenValue.replace('Bearer ', '');
+
     // Construct WebSocket URL with both sessionId and token parameters
     // We pass token in query param as fallback for browsers that don't support WebSocket headers
-    const wsUrl = `${socketProtocol}//${host}/ws/${this.gameId}?sessionId=${this.sessionId}&token=${encodeURIComponent(tokenValue)}`;
+    const wsUrl = `${socketProtocol}//${host}/ws/${this.gameId}?sessionId=${this.sessionId}&token=${encodeURIComponent(urlToken)}`;
     log('CONNECT', `Connecting to WebSocket URL: ${wsUrl}`);
     
-    // Store the token for the Authorization header
-    this.authToken = tokenValue;
+    // Store both versions of the token
+    this.authToken = tokenValue;  // Full token with 'Bearer ' prefix for Authorization header
+    this.urlToken = urlToken;     // Token without prefix for URL parameters
 
     this.onConnectionChange('connecting');
 
@@ -146,16 +150,19 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         }
       }
 
-      // Create new WebSocket connection
-      this.socket = new WebSocket(wsUrl);
-      
-      // Set the Authorization header if supported by the browser
-      if (typeof this.socket.setRequestHeader === 'function') {
-        try {
-          this.socket.setRequestHeader('Authorization', this.authToken);
-        } catch (e) {
-          logWarning('CONNECT', 'Could not set WebSocket Authorization header, falling back to query parameter', e);
-        }
+      // For WebSocket connections, we need to add headers during connection
+      const wsHeaders = {
+        'Authorization': tokenValue
+      };
+
+      // Create new WebSocket connection with headers
+      try {
+        // Try first with the headers option (supported in some browsers)
+        this.socket = new WebSocket(wsUrl, [], { headers: wsHeaders });
+      } catch (e) {
+        // If headers option fails, fallback to query parameter only
+        logWarning('CONNECT', 'WebSocket with headers not supported, using query parameter only', e);
+        this.socket = new WebSocket(wsUrl);
       }
 
       // Clear previous listeners to avoid duplicates
@@ -173,9 +180,13 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         log('CONNECT', `Token used (prefix only): ${this.token ? this.token.substring(0, 10) + '...' : 'none'}`);
 
         // Send auth message immediately after connection
-        if (this.authToken) {
+        if (this.urlToken) {  // Use the URL version of the token without 'Bearer ' prefix
           try {
-            this.sendMessage('auth', { token: this.authToken });
+            this.sendMessage('auth', { 
+              token: this.urlToken,
+              playerId: this.playerId,
+              sessionId: this.sessionId
+            });
             log('CONNECT', 'Sent authentication message');
           } catch (e) {
             logWarning('CONNECT', 'Failed to send auth message:', e);
