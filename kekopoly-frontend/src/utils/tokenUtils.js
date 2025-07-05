@@ -18,7 +18,8 @@ export const isValidJWTFormat = (token) => {
   if (parts.length !== 3) return false;
   
   // Each part should be non-empty and contain valid base64 characters
-  const base64Regex = /^[A-Za-z0-9+/]+=*$/;
+  // Allow both standard base64 (+/) and URL-safe base64 (-_) characters
+  const base64Regex = /^[A-Za-z0-9+/\-_]+=*$/;
   return parts.every(part => part.length > 0 && base64Regex.test(part));
 };
 
@@ -50,7 +51,7 @@ export const isTokenExpired = (token) => {
     }
     
     // Validate base64 characters before attempting to decode
-    const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+    const base64Regex = /^[A-Za-z0-9+/\-_]*={0,2}$/;
     if (!base64Regex.test(payloadPart)) {
       console.warn('Invalid base64 characters in JWT payload');
       return true;
@@ -101,7 +102,7 @@ export const getTokenExpiration = (token) => {
       payloadPart += '=';
     }
     
-    const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+    const base64Regex = /^[A-Za-z0-9+/\-_]*={0,2}$/;
     if (!base64Regex.test(payloadPart)) return null;
     
     const payload = JSON.parse(atob(payloadPart));
@@ -135,7 +136,7 @@ export const getTokenTimeRemaining = (token) => {
       payloadPart += '=';
     }
     
-    const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+    const base64Regex = /^[A-Za-z0-9+/\-_]*={0,2}$/;
     if (!base64Regex.test(payloadPart)) return 0;
     
     const payload = JSON.parse(atob(payloadPart));
@@ -171,7 +172,7 @@ export const getUserIdFromToken = (token) => {
       payloadPart += '=';
     }
     
-    const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+    const base64Regex = /^[A-Za-z0-9+/\-_]*={0,2}$/;
     if (!base64Regex.test(payloadPart)) return null;
     
     const payload = JSON.parse(atob(payloadPart));

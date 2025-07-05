@@ -76,6 +76,7 @@ const authSlice = createSlice({
           localStorage.setItem('kekopoly_user', JSON.stringify(action.payload));
         } else {
           console.error('Received invalid JWT token from login');
+          console.error('Token value:', action.payload.token);
           state.error = 'Invalid authentication token received';
         }
       })
@@ -99,6 +100,7 @@ const authSlice = createSlice({
           localStorage.setItem('kekopoly_user', JSON.stringify(action.payload));
         } else {
           console.error('Received invalid JWT token from registration');
+          console.error('Token value:', action.payload.token);
           state.error = 'Invalid authentication token received';
         }
       })
