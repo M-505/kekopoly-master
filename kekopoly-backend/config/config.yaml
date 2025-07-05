@@ -19,8 +19,7 @@ mongodb:
   maxConnIdleTime: 30
 
 redis:
-  uri: "redis:6379"
-  password: ""
+  uri: "${REDIS_URI}"
   db: 0
 
 jwt:
