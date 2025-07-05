@@ -517,7 +517,7 @@ func (gm *GameManager) JoinGame(gameID, playerID string) (string, error) {
 	session.Game.LastActivity = time.Now()
 
 	// Update game in database
-	objID, err := primitive.ObjectIDFromHex(gameID)
+	objID, err := primitive.ObjectIDFromHex(normalizedGameID)
 	if err != nil {
 		return "", fmt.Errorf("invalid game ID: %w", err)
 	}
@@ -549,7 +549,7 @@ func (gm *GameManager) JoinGame(gameID, playerID string) (string, error) {
 		IsConnected: true,
 	}
 
-	gm.logger.Infof("Player %s joined game %s", playerID, gameID)
+	gm.logger.Infof("Player %s joined game %s", playerID, normalizedGameID)
 
 	return sessionID, nil
 }

@@ -10,7 +10,7 @@ import GameLobby from './components/lobby/GameLobby';
 import GameRoom from './components/lobby/GameRoom';
 import { store } from './store/store';
 import { setGameStarted, setGamePhase, syncGameStatus } from './store/gameSlice';
-import { clearGameStorageData } from './utils/storageUtils';
+import { clearGameStorageData, detectRedirectLoop } from './utils/storageUtils';
 import { v4 as uuidv4 } from 'uuid';
 import { connectSuccess } from './store/authSlice';
 import LoginForm from './components/auth/LoginForm';
@@ -115,17 +115,26 @@ function App() {
             }
 
             // Make an API call to verify the game exists
-            const response = await fetch(`/api/games/${storedGameId}`, {
+            const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'}/api/v1/games/${storedGameId}`, {
               headers: {
-                'Authorization': token.startsWith('Bearer ') ? token : `Bearer ${token}`
+                'Authorization': token.startsWith('Bearer ') ? token : `Bearer ${token}`,
+                'Content-Type': 'application/json'
               }
             });
 
             if (!response.ok) {
-              console.warn(`[APP] Game ${storedGameId} does not exist or cannot be accessed`);
+              console.warn(`[APP] Game ${storedGameId} does not exist or cannot be accessed (Status: ${response.status})`);
 
+              // Check if this is a redirect loop
+              const isLoop = detectRedirectLoop(storedGameId);
+              
               // Clear the localStorage data for this non-existent game
               clearGameStorageData(storedGameId);
+              
+              // Also clear Redux state to prevent any remaining game state
+              dispatch(setGameStarted(false));
+              dispatch(setGamePhase(''));
+              dispatch(syncGameStatus(''));
 
               return false;
             }
@@ -158,12 +167,30 @@ function App() {
               // Navigate to the game
               navigate(targetPath);
             } else {
-              console.warn(`[APP] Game ${storedGameId} does not exist, not navigating`);
-              // If on home page, stay there; otherwise navigate to home
-              if (location.pathname !== '/') {
-                navigate('/');
-              }
+              console.warn(`[APP] Game ${storedGameId} does not exist, clearing all game data and redirecting to lobby`);
+              
+              // Clear all game-related data completely
+              clearGameStorageData(); // Clear all game data, not just for this game
+              
+              // Clear Redux game state
+              dispatch(setGameStarted(false));
+              dispatch(setGamePhase(''));
+              dispatch(syncGameStatus(''));
+              
+              // Navigate to lobby instead of home to give user a clear path forward
+              navigate('/lobby');
             }
+          }).catch(error => {
+            console.error(`[APP] Error verifying game exists:`, error);
+            
+            // Clear all game data on any error
+            clearGameStorageData();
+            dispatch(setGameStarted(false));
+            dispatch(setGamePhase(''));
+            dispatch(syncGameStatus(''));
+            
+            // Navigate to lobby
+            navigate('/lobby');
           });
         }
       }

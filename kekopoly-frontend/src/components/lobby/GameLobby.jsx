@@ -44,6 +44,7 @@ import { setRoomCode } from '../../store/gameSlice';
 import socketService from '../../services/socket';
 import { apiGet, apiPost } from '../../utils/apiUtils';
 import sessionMonitor from '../../utils/sessionMonitor';
+import { clearGameStorageData } from '../../utils/storageUtils';
 
 // Add function to prompt for password
 const useCleanupPrompt = () => {
@@ -105,6 +106,33 @@ const GameLobby = () => {
 
   // Get auth state from Redux
   const { token, user } = useSelector((state) => state.auth);
+
+  // Clear any lingering game state when lobby loads
+  useEffect(() => {
+    try {
+      // Check if user manually navigated to lobby (not from a redirect)
+      const fromGamePage = document.referrer.includes('/game/') || 
+                           window.history.state?.from?.includes('/game/');
+      
+      if (!fromGamePage) {
+        // User manually navigated to lobby, clear any game state
+        const gameStarted = localStorage.getItem('kekopoly_game_started');
+        const gameId = localStorage.getItem('kekopoly_game_id');
+        
+        if (gameStarted === 'true' && gameId) {
+          console.log('[LOBBY] User navigated to lobby with active game state, clearing...');
+          clearGameStorageData();
+          
+          // Clear Redux game state as well
+          dispatch({ type: 'game/setGameStarted', payload: false });
+          dispatch({ type: 'game/setGamePhase', payload: '' });
+          dispatch({ type: 'game/syncGameStatus', payload: '' });
+        }
+      }
+    } catch (e) {
+      console.warn('[LOBBY] Error clearing game state:', e);
+    }
+  }, []); // Run only once when component mounts
 
   // State
   const [roomCode, setLocalRoomCode] = useState('');

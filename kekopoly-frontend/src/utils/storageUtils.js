@@ -54,14 +54,15 @@ export const clearGameStorageData = (gameId = null) => {
       // Also clear any game-specific player data
       localStorage.removeItem(`kekopoly_player_${gameId}`);
       localStorage.removeItem(`kekopoly_player_token_${gameId}`);
+      localStorage.removeItem(`kekopoly_player_name_${gameId}`);
     } else {
       // Clear all game-specific keys if no game ID provided
       gameSpecificKeys.forEach(key => localStorage.removeItem(key));
       
       // Find and clear any game-specific player data
-      for (let i = 0; i < localStorage.length; i++) {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
         const key = localStorage.key(i);
-        if (key && (key.startsWith('kekopoly_player_') || key.includes('_game_'))) {
+        if (key && (key.startsWith('kekopoly_player_') || key.includes('_game_') || key.startsWith('kekopoly_socket_'))) {
           localStorage.removeItem(key);
         }
       }
@@ -107,6 +108,67 @@ export const setGameStorageData = (gameId, started = true, phase = 'playing') =>
     return true;
   } catch (e) {
     console.error('[STORAGE] Error setting game storage data:', e);
+    return false;
+  }
+};
+
+/**
+ * Detect and prevent redirect loops by tracking failed attempts
+ * @param {string} gameId - Game ID that failed to load
+ * @returns {boolean} - True if this appears to be a redirect loop
+ */
+export const detectRedirectLoop = (gameId) => {
+  try {
+    const key = 'kekopoly_failed_redirects';
+    const now = Date.now();
+    const maxAttempts = 3;
+    const timeWindow = 30000; // 30 seconds
+    
+    // Get previous failed attempts
+    const storedData = localStorage.getItem(key);
+    let failedAttempts = [];
+    
+    if (storedData) {
+      try {
+        failedAttempts = JSON.parse(storedData);
+      } catch (e) {
+        failedAttempts = [];
+      }
+    }
+    
+    // Filter out old attempts (outside time window)
+    failedAttempts = failedAttempts.filter(attempt => 
+      (now - attempt.timestamp) < timeWindow
+    );
+    
+    // Count attempts for this specific game
+    const gameAttempts = failedAttempts.filter(attempt => 
+      attempt.gameId === gameId
+    );
+    
+    // Add current attempt
+    failedAttempts.push({
+      gameId,
+      timestamp: now
+    });
+    
+    // Store updated attempts
+    localStorage.setItem(key, JSON.stringify(failedAttempts));
+    
+    // Check if we've exceeded max attempts for this game
+    const isLoop = gameAttempts.length >= maxAttempts;
+    
+    if (isLoop) {
+      console.warn(`[REDIRECT_LOOP] Detected redirect loop for game ${gameId}, clearing all game data`);
+      // Clear all redirect attempt tracking
+      localStorage.removeItem(key);
+      // Clear all game data
+      clearGameStorageData();
+    }
+    
+    return isLoop;
+  } catch (e) {
+    console.error('[REDIRECT_LOOP] Error detecting redirect loop:', e);
     return false;
   }
 };
