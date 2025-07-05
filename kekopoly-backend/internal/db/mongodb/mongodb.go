@@ -12,6 +12,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/connstring"
 	"go.uber.org/zap"
 )
 
@@ -156,6 +157,22 @@ func Connect(ctx context.Context, uri string, logger ...*zap.SugaredLogger) (*mo
 	}
 
 	// Create connection options with sensible pool settings
+	var client *mongo.Client
+	var err error
+
+	// Parse the connection string to extract SSL settings
+	connString, parseErr := connstring.Parse(uri)
+	if parseErr != nil {
+		return nil, fmt.Errorf("failed to parse MongoDB URI: %w", parseErr)
+	}
+
+	// Configure TLS based on URI parameters
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: false,
+		MinVersion:         tls.VersionTLS12,
+	}
+
+	// Create connection options with Atlas-specific settings
 	clientOptions := options.Client().
 		ApplyURI(uri).
 		SetMinPoolSize(5).
@@ -163,20 +180,16 @@ func Connect(ctx context.Context, uri string, logger ...*zap.SugaredLogger) (*mo
 		SetMaxConnIdleTime(30 * time.Second).
 		SetRetryWrites(true).
 		SetRetryReads(true).
-		SetServerSelectionTimeout(5 * time.Second).
-		SetConnectTimeout(10 * time.Second).
-		SetTLSConfig(&tls.Config{
-			InsecureSkipVerify: false,
-			MinVersion:         tls.VersionTLS12,
-		})
-
-	var client *mongo.Client
-	var err error
+		SetServerSelectionTimeout(15 * time.Second). // Increased timeout
+		SetConnectTimeout(30 * time.Second).         // Increased timeout
+		SetTLSConfig(tlsConfig).
+		SetDirect(false). // Required for replica sets
+		SetReplicaSet(connString.ReplicaSet)
 
 	// Retry configuration
 	maxRetries := 5
-	initialBackoff := 500 * time.Millisecond
-	maxBackoff := 10 * time.Second
+	initialBackoff := 1 * time.Second // Increased initial backoff
+	maxBackoff := 15 * time.Second    // Increased max backoff
 
 	// Exponential backoff with jitter for retries
 	for attempt := 0; attempt < maxRetries; attempt++ {
