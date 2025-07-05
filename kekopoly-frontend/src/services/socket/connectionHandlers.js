@@ -134,7 +134,14 @@ export function connect(gameId, playerId, token, initialPlayerData) {
 
     // Construct WebSocket URL with both sessionId and token parameters
     // We pass token in query param as fallback for browsers that don't support WebSocket headers
-    const wsUrl = `${socketProtocol}//${host}/ws/${this.gameId}?sessionId=${this.sessionId}&token=${encodeURIComponent(urlToken)}`;
+    let wsUrl;
+    if (this.gameId && this.gameId.trim() !== '') {
+      // Connect to specific game
+      wsUrl = `${socketProtocol}//${host}/ws/${this.gameId}?sessionId=${this.sessionId}&token=${encodeURIComponent(urlToken)}`;
+    } else {
+      // Connect to lobby if no specific game ID
+      wsUrl = `${socketProtocol}//${host}/ws/lobby?sessionId=${this.sessionId}&token=${encodeURIComponent(urlToken)}`;
+    }
     log('CONNECT', `Connecting to WebSocket URL: ${wsUrl}`);
     
     // Store both versions of the token

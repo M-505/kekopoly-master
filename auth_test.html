@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Kekopoly Auth Test</title>
+</head>
+<body>
+    <h1>Kekopoly Authentication Test</h1>
+    
+    <div id="login-section">
+        <h2>Login</h2>
+        <input type="text" id="username" placeholder="Username" value="demo">
+        <input type="password" id="password" placeholder="Password" value="demopassword">
+        <button onclick="login()">Login</button>
+    </div>
+    
+    <div id="websocket-section" style="display:none;">
+        <h2>WebSocket Connection</h2>
+        <input type="text" id="sessionId" placeholder="Session ID" value="d6t9qhqlf8j">
+        <button onclick="connectWebSocket()">Connect to Lobby</button>
+        <div id="connection-status"></div>
+        <div id="messages"></div>
+    </div>
+
+    <script>
+        let authToken = null;
+        const API_BASE = 'https://kekopoly-master.onrender.com';
+        
+        async function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            
+            try {
+                const response = await fetch(`${API_BASE}/auth/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    authToken = data.token;
+                    document.getElementById('login-section').style.display = 'none';
+                    document.getElementById('websocket-section').style.display = 'block';
+                    console.log('Login successful, token:', authToken);
+                } else {
+                    const error = await response.text();
+                    alert('Login failed: ' + error);
+                }
+            } catch (error) {
+                alert('Login error: ' + error.message);
+            }
+        }
+        
+        function connectWebSocket() {
+            if (!authToken) {
+                alert('Please login first');
+                return;
+            }
+            
+            const sessionId = document.getElementById('sessionId').value;
+            const wsUrl = `wss://kekopoly-master.onrender.com/ws/lobby?sessionId=${sessionId}&token=${authToken}`;
+            
+            const ws = new WebSocket(wsUrl);
+            
+            ws.onopen = function(event) {
+                document.getElementById('connection-status').innerHTML = '✅ Connected to lobby';
+                console.log('WebSocket connected');
+            };
+            
+            ws.onmessage = function(event) {
+                const messages = document.getElementById('messages');
+                messages.innerHTML += '<div>Received: ' + event.data + '</div>';
+                console.log('Message received:', event.data);
+            };
+            
+            ws.onerror = function(error) {
+                document.getElementById('connection-status').innerHTML = '❌ Connection failed';
+                console.error('WebSocket error:', error);
+            };
+            
+            ws.onclose = function(event) {
+                document.getElementById('connection-status').innerHTML = '🔴 Connection closed';
+                console.log('WebSocket closed:', event.code, event.reason);
+            };
+        }
+    </script>
+</body>
+</html>

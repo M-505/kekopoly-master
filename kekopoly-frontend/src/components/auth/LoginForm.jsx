@@ -110,6 +110,11 @@ const LoginForm = ({ initialMode = 'login' }) => {
                   </Button>
                 </InputRightElement>
               </InputGroup>
+              {!isLogin && (
+                <Text fontSize="sm" color="gray.500" mt={1}>
+                  Password must be at least 8 characters long
+                </Text>
+              )}
             </FormControl>
             
             {!isLogin && (
