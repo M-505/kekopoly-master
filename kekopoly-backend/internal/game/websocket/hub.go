@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -18,6 +17,9 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 )
+
+// Initialize a separate random number generator for dice rolls to ensure consistency
+var diceRand = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 // MessageQueue defines the interface for the message queue
 type MessageQueue interface {
@@ -139,6 +141,96 @@ type Client struct {
 
 	// Connection timestamp
 	connectedAt time.Time
+}
+
+// isActive checks if the client has been active within the given duration
+func (c *Client) isActive(duration time.Duration) bool {
+	c.pongMutex.RLock()
+	defer c.pongMutex.RUnlock()
+	return time.Since(c.lastPongTime) <= duration
+}
+
+// handleVerifyHost handles a request to verify the host of a game
+func (c *Client) handleVerifyHost(msg map[string]interface{}) {
+	// Get game info
+	gameInfo := c.hub.getGameInfo(c.gameID)
+	if gameInfo == nil {
+		c.hub.logger.Warnf("No game info found for game %s during host verification", c.gameID)
+		return
+	}
+
+	// Get current host ID
+	hostID, ok := gameInfo["hostId"].(string)
+	if !ok {
+		c.hub.logger.Warnf("No host ID found in game info for game %s", c.gameID)
+		return
+	}
+
+	// Create response
+	response := map[string]interface{}{
+		"type":    "host_verified",
+		"gameId":  c.gameID,
+		"hostId":  hostID,
+		"isHost":  c.playerID == hostID,
+		"success": true,
+	}
+
+	// Marshal to JSON
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		c.hub.logger.Errorf("Failed to marshal host_verified response: %v", err)
+		return
+	}
+
+	// Send response to the requesting client with high priority
+	c.hub.SendToPlayerWithPriority(c.gameID, c.playerID, responseJSON, PriorityHigh)
+}
+
+// handleGetActivePlayers handles a request for active players list
+func (c *Client) handleGetActivePlayers() {
+	// Get list of players in this game
+	c.hub.clientsMutex.RLock()
+	gamePlayers, exists := c.hub.clients[c.gameID]
+	if !exists {
+		c.hub.clientsMutex.RUnlock()
+		c.hub.logger.Warnf("No players found for game %s", c.gameID)
+		return
+	}
+
+	activePlayers := make([]map[string]interface{}, 0)
+	// Collect active players info
+	for playerID := range gamePlayers {
+		playerInfo := c.hub.getPlayerInfo(c.gameID, playerID)
+		if playerInfo == nil {
+			playerInfo = make(map[string]interface{})
+			playerInfo["id"] = playerID
+		}
+
+		// Add connection status
+		playerInfo["isConnected"] = true
+		playerInfo["isActive"] = gamePlayers[playerID].isActive(90 * time.Second)
+
+		activePlayers = append(activePlayers, playerInfo)
+	}
+	c.hub.clientsMutex.RUnlock()
+
+	// Create response
+	response := map[string]interface{}{
+		"type":          "active_players",
+		"activePlayers": activePlayers,
+		"gameId":        c.gameID,
+		"timestamp":     time.Now().Format(time.RFC3339),
+	}
+
+	// Marshal to JSON
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		c.hub.logger.Errorf("Failed to marshal active_players response: %v", err)
+		return
+	}
+
+	// Broadcast active players list to all clients in the game with high priority
+	c.hub.BroadcastToGameWithPriority(c.gameID, responseJSON, PriorityHigh)
 }
 
 // BroadcastMessage represents a message to be broadcast to clients
@@ -600,6 +692,53 @@ func (h *Hub) CheckInactiveClients(inactivityThreshold time.Duration) {
 
 	if len(inactiveClients) > 0 {
 		h.logger.Infof("Unregistered %d inactive clients", len(inactiveClients))
+	}
+}
+
+// updateGameInfoCache updates the cached game information for a specific game
+func (h *Hub) updateGameInfoCache(gameID string) {
+	if h.gameManager == nil {
+		h.logger.Warnf("Game manager is nil, cannot update game info cache for game %s", gameID)
+		return
+	}
+
+	// Get game from manager
+	game, err := h.gameManager.GetGame(gameID)
+	if err != nil {
+		h.logger.Warnf("Failed to get game %s from manager: %v", gameID, err)
+		return
+	}
+
+	// Update game info cache
+	gameInfo := h.getGameInfo(gameID)
+	if gameInfo == nil {
+		gameInfo = make(map[string]interface{})
+	}
+
+	// Update basic game information
+	gameInfo["gameId"] = gameID
+	gameInfo["status"] = string(game.Status)
+	gameInfo["currentTurn"] = game.CurrentTurn
+	gameInfo["turnOrder"] = game.TurnOrder
+	gameInfo["lastUpdated"] = time.Now().Format(time.RFC3339)
+
+	// Store updated game info
+	h.storeGameInfo(gameID, gameInfo)
+}
+
+// updateAllGameInfoCache updates the game info cache for all active games
+func (h *Hub) updateAllGameInfoCache() {
+	// Get list of active games
+	h.clientsMutex.RLock()
+	activeGames := make([]string, 0, len(h.clients))
+	for gameID := range h.clients {
+		activeGames = append(activeGames, gameID)
+	}
+	h.clientsMutex.RUnlock()
+
+	// Update cache for each active game
+	for _, gameID := range activeGames {
+		h.updateGameInfoCache(gameID)
 	}
 }
 
@@ -1268,6 +1407,17 @@ func processMessages(c *Client, queue chan []byte, rateLimiter *time.Ticker, sen
 	return processed > 0
 }
 
+// toStringOrDefault converts an interface{} to a string, returning a default value if conversion fails
+func toStringOrDefault(value interface{}, defaultValue string) string {
+	if value == nil {
+		return defaultValue
+	}
+	if str, ok := value.(string); ok {
+		return str
+	}
+	return defaultValue
+}
+
 // handleMessage processes incoming WebSocket messages
 func (c *Client) handleMessage(message []byte) {
 	// Parse message and handle different event types
@@ -1502,34 +1652,7 @@ func (c *Client) handleMessage(message []byte) {
 		// For now, we'll use a deterministic approach based on the player's position
 		// This ensures the frontend and backend show the same dice values
 
-		// Get the dice values from the game manager logs
-		// The game manager logs the dice values in the format:
-		// "Player %s rolled %d and %d, now at position %d"
-
-		// We'll extract these values from the logs
-		// For now, we'll use a simple approach to get the dice values
-
-		// Create a deterministic seed based on the player ID and current time (minute)
-		h := fnv.New32()
-		h.Write([]byte(c.playerID))
-		seed := int64(h.Sum32())
-		seed += time.Now().Unix() / 60 // Changes every minute
-
-		// Create a random source with this seed
-		diceRand := rand.New(rand.NewSource(seed))
-
-		// Generate dice values (1-6)
-		// But we'll modify this to use the actual dice values from the game manager
-		// by parsing the game manager logs
-
 		// Get the dice values from the game manager
-		// We need to modify the game manager to store the dice values in the game state
-		// For now, we'll use the position to calculate the dice values
-
-		// Find the player in the game state before the dice roll
-		// This is a simplified approach - in a real implementation, we would store the dice values
-
-		// Use the actual dice values from the game manager's log
 		// The game manager logs: "Player %s rolled %d and %d, now at position %d"
 		// We'll extract these values from the logs
 
@@ -1674,31 +1797,48 @@ func (c *Client) handleMessage(message []byte) {
 		if c.hub.gameManager != nil {
 			// Get the game from the game manager
 			game, err := c.hub.gameManager.GetGame(c.gameID)
-			if err == nil {
-				// Find the player in the game
-				for i, player := range game.Players {
-					if player.ID == playerId {
-						// Update the player's token
-						if token, ok := playerInfo["token"].(string); ok && token != "" {
-							game.Players[i].CharacterToken = token
-						} else if characterToken, ok := playerInfo["characterToken"].(string); ok && characterToken != "" {
-							game.Players[i].CharacterToken = characterToken
-						} else if emoji, ok := playerInfo["emoji"].(string); ok && emoji != "" {
-							game.Players[i].CharacterToken = emoji
-						}
-
-						// Update the game in the database
-						err = c.hub.gameManager.UpdateGame(game)
-						if err != nil {
-							c.hub.logger.Warnf("[TOKEN_UPDATE] Failed to update game in database: %v", err)
-						} else {
-							c.hub.logger.Infof("[TOKEN_UPDATE] Updated player token in database for %s in game %s", playerId, c.gameID)
-						}
-						break
-					}
-				}
-			} else {
+			if err != nil {
 				c.hub.logger.Warnf("[TOKEN_UPDATE] Failed to get game %s from manager: %v", c.gameID, err)
+				return
+			}
+			found := false
+			for i, player := range game.Players {
+				if player.ID == playerId {
+					// Update the player's token
+					if token, ok := playerInfo["token"].(string); ok && token != "" {
+						game.Players[i].CharacterToken = token
+					} else if characterToken, ok := playerInfo["characterToken"].(string); ok && characterToken != "" {
+						game.Players[i].CharacterToken = characterToken
+					} else if emoji, ok := playerInfo["emoji"].(string); ok && emoji != "" {
+						game.Players[i].CharacterToken = emoji
+					}
+					found = true
+					// Update the game in the database
+					err = c.hub.gameManager.UpdateGame(game)
+					if err != nil {
+						c.hub.logger.Warnf("[TOKEN_UPDATE] Failed to update game in database: %v", err)
+					} else {
+						c.hub.logger.Infof("[TOKEN_UPDATE] Updated player token in database for %s in game %s", playerId, c.gameID)
+					}
+					break
+				}
+			}
+			// If not found, auto-register the player in the game state
+			if !found {
+				newPlayer := models.Player{
+					ID:             playerId,
+					CharacterToken: toStringOrDefault(playerInfo["token"], ""),
+					Status:         models.PlayerStatusConnected,
+					Balance:       1500, // Starting balance
+					Position:      0,    // Starting position
+				}
+				game.Players = append(game.Players, newPlayer)
+				err = c.hub.gameManager.UpdateGame(game)
+				if err != nil {
+					c.hub.logger.Warnf("[TOKEN_UPDATE] Failed to auto-register player in game DB: %v", err)
+				} else {
+					c.hub.logger.Infof("[TOKEN_UPDATE] Auto-registered player %s in game %s and updated DB", playerId, c.gameID)
+				}
 			}
 		}
 
@@ -1774,10 +1914,41 @@ func (c *Client) handleMessage(message []byte) {
 			c.hub.logger.Infof("[PLAYER_READY] Created new player info for %s, isReady=%v", playerId, isReady)
 		}
 		// ---
-
-		// Add message ID to the response if it was provided
-		if messageId != "" {
-			msg["responseToMessageId"] = messageId
+		// Also update the player in the game manager's database if not present
+		if c.hub.gameManager != nil {
+			game, err := c.hub.gameManager.GetGame(c.gameID)
+			if err == nil {
+				found := false
+				for i, player := range game.Players {
+					if player.ID == playerId {
+						if isReady {
+							game.Players[i].Status = models.PlayerStatusReady
+						} else {
+							game.Players[i].Status = models.PlayerStatusConnected
+						}
+						found = true
+						break
+					}
+				}
+				if !found {
+					newPlayer := models.Player{
+						ID:             playerId,
+						CharacterToken: toStringOrDefault(playerInfo["token"], ""),
+						Status:         models.PlayerStatusReady,
+						Balance:        1500, // Starting balance
+						Position:       0,    // Starting position
+					}
+					game.Players = append(game.Players, newPlayer)
+					err = c.hub.gameManager.UpdateGame(game)
+					if err != nil {
+						c.hub.logger.Warnf("[PLAYER_READY] Failed to auto-register player in game DB: %v", err)
+					} else {
+						c.hub.logger.Infof("[PLAYER_READY] Auto-registered player %s in game %s and updated DB", playerId, c.gameID)
+					}
+				}
+			} else {
+				c.hub.logger.Warnf("[PLAYER_READY] Failed to get game %s from manager: %v", c.gameID, err)
+			}
 		}
 
 		// Broadcast player ready status to all clients with high priority
@@ -1886,362 +2057,63 @@ func (c *Client) handleMessage(message []byte) {
 
 		// Also broadcast the updated list of active players to all clients
 		c.handleGetActivePlayers()
-		break
-
-	default:
-		// By default, broadcast all messages to other clients in the game
-		c.hub.BroadcastToGameExcept(c.gameID, message, c.playerID)
 	}
 }
 
-// handleVerifyHost verifies if the player is the host of the game
-func (c *Client) handleVerifyHost(msg map[string]interface{}) {
-	// Use the current player ID if not specified in the message
-	playerID := c.playerID
+// HandleLobbyWebSocketConnection handles WebSocket connections for the lobby
+func (h *Hub) HandleLobbyWebSocketConnection(conn *websocket.Conn, playerID, sessionID string) {
+	// Use special lobby game ID prefix to avoid conflicts with real game IDs
+	const lobbyGameID = "lobby"
 
-	// Get game info to check host ID
-	gameInfo := c.hub.getGameInfo(c.gameID)
-
-	// If game info is not in cache, try to update it first
-	if gameInfo == nil {
-		c.hub.logger.Infof("Game info not found in cache for game %s, updating cache", c.gameID)
-		c.hub.updateGameInfoCache(c.gameID)
-		gameInfo = c.hub.getGameInfo(c.gameID)
+	// Create a new client for the lobby connection
+	client := &Client{
+		hub:                h,
+		conn:              conn,
+		highPriorityQueue: make(chan []byte, 256),
+		normalPriorityQueue: make(chan []byte, 256),
+		lowPriorityQueue:  make(chan []byte, 256),
+		gameID:            lobbyGameID,
+		playerID:          playerID,
+		sessionID:         sessionID,
+		lastPongTime:      time.Now(),
+		connectedAt:       time.Now(),
+		isReconnection:    false,
 	}
 
-	// If still not found, try to get host ID directly from game manager
-	var hostID string
-	if gameInfo == nil || gameInfo["hostId"] == nil {
-		if c.hub.gameManager != nil {
-			game, err := c.hub.gameManager.GetGame(c.gameID)
-			if err != nil {
-				c.hub.logger.Warnf("Failed to get game from manager: %v", err)
-				c.sendHostVerificationResponse(false, "", "Game not found")
-				return
-			}
-			hostID = game.HostID
-		} else {
-			c.hub.logger.Warnf("Game info not found for game %s and game manager is nil", c.gameID)
-			c.sendHostVerificationResponse(false, "", "Game not found")
-			return
-		}
-	} else {
-		// Get host ID from game info
-		var ok bool
-		hostID, ok = gameInfo["hostId"].(string)
-		if !ok || hostID == "" {
-			c.hub.logger.Warnf("Host ID not found for game %s", c.gameID)
-			c.sendHostVerificationResponse(false, "", "Host not assigned for this game")
-			return
-		}
+	h.register <- client
+
+	// Start client routines in separate goroutines
+	go client.writePump()
+	go client.readPump()
+
+	// Log successful lobby connection
+	h.logger.Infof("Lobby connection established for player %s with session %s", playerID, sessionID)
+
+	// Add session info
+	h.sessionHistoryMutex.Lock()
+	if h.sessionHistory[lobbyGameID] == nil {
+		h.sessionHistory[lobbyGameID] = make(map[string][]SessionInfo)
 	}
-
-	// Send the host verification response with the current host ID
-	// This will allow the client to update its state regardless of whether the current player is the host
-	c.hub.logger.Infof("Sending host verification response for game %s. Host is %s, current player is %s",
-		c.gameID, hostID, playerID)
-
-	// Check if the player is the host
-	isHost := playerID == hostID
-
-	if isHost {
-		c.hub.logger.Infof("Player %s verified as host of game %s", playerID, c.gameID)
-		c.sendHostVerificationResponse(true, hostID, "")
-	} else {
-		c.hub.logger.Infof("Player %s is not the host of game %s. Host is %s", playerID, c.gameID, hostID)
-		c.sendHostVerificationResponse(false, hostID, "You are not the host of this game")
-	}
+	h.sessionHistory[lobbyGameID][playerID] = append(h.sessionHistory[lobbyGameID][playerID], SessionInfo{
+		SessionID:    sessionID,
+		ConnectedAt:  time.Now(),
+		LastActivity: time.Now(),
+		Status:       "CONNECTED",
+	})
+	h.sessionHistoryMutex.Unlock()
 }
 
-// sendHostVerificationResponse sends a host verification response to the client
-func (c *Client) sendHostVerificationResponse(success bool, hostId string, errorMessage string) {
-	// Create the response message
-	response := map[string]interface{}{
-		"type":    "host_verification",
-		"success": success,
-		"hostId":  hostId,
-		"gameId":  c.gameID,
-	}
-
-	// Add error message if provided
-	if errorMessage != "" {
-		response["message"] = errorMessage
-	}
-
-	// Marshal to JSON
-	responseJSON, err := json.Marshal(response)
-	if err != nil {
-		c.hub.logger.Warnf("Failed to marshal host_verification response: %v", err)
-		return
-	}
-
-	// Send to the client
-	c.hub.SendToPlayerWithPriority(c.gameID, c.playerID, responseJSON, PriorityNormal)
-}
-
-// sendHostVerificationFailed is a legacy method that is kept for backward compatibility
-func (c *Client) sendHostVerificationFailed(errorMessage string) {
-	c.sendHostVerificationResponse(false, "", errorMessage)
-}
-
-// handleGetActivePlayers responds with a list of active players in the game
-func (c *Client) handleGetActivePlayers() {
-	// --- Safely get player info and host ID ---
-	var hostID string
-	players := []map[string]interface{}{}
-	var gameInfo map[string]interface{} // Use local variable
-
-	// Lock for reading clients and playerInfo
-	c.hub.clientsMutex.RLock()
-	c.hub.playerInfoMutex.RLock()
-	c.hub.gameInfoMutex.RLock() // Lock gameInfo too
-
-	// Get host ID (same logic as before, but now within locks)
-	if c.hub.gameManager != nil {
-		game, err := c.hub.gameManager.GetGame(c.gameID)
-		if err == nil && game != nil && game.HostID != "" {
-			hostID = game.HostID
-		} else {
-			// Fallback to Hub's gameInfo map (read under lock)
-			tempGameInfo := c.hub.getGameInfo_unlocked(c.gameID) // Assumes an unlocked version exists or create one
-			if tempGameInfo != nil {
-				if hostIDStr, ok := tempGameInfo["hostId"].(string); ok {
-					hostID = hostIDStr
-				}
-			}
-		}
-	} else {
-		// Fallback if gameManager is nil (read under lock)
-		tempGameInfo := c.hub.getGameInfo_unlocked(c.gameID) // Assumes an unlocked version exists or create one
-		if tempGameInfo != nil {
-			if hostIDStr, ok := tempGameInfo["hostId"].(string); ok {
-				hostID = hostIDStr
-			}
-		}
-	}
-
-	// Copy gameInfo while under lock
-	// Create a deep copy to avoid race conditions during JSON marshal
-	sourceGameInfo := c.hub.getGameInfo_unlocked(c.gameID)
-	if sourceGameInfo != nil {
-		copiedInfoBytes, err := json.Marshal(sourceGameInfo)
-		if err == nil {
-			err = json.Unmarshal(copiedInfoBytes, &gameInfo) // Unmarshal into our local variable
-			if err != nil {
-				c.hub.logger.Warnf("Failed to deep copy gameInfo: %v", err)
-				gameInfo = nil // Reset on error
-			}
-		} else {
-			c.hub.logger.Warnf("Failed to marshal source gameInfo for deep copy: %v", err)
-		}
-	}
-
-	// Create a list of active, connected players (read under lock)
-	if gamePlayers, ok := c.hub.clients[c.gameID]; ok {
-		for playerID, client := range gamePlayers {
-			if client.isActive(90 * time.Second) {
-				// Get player info from Hub's cache (read under lock)
-				storedPlayerInfo := c.hub.getPlayerInfo_unlocked(c.gameID, playerID) // Assumes an unlocked version
-				var playerInfo map[string]interface{}
-
-				if storedPlayerInfo != nil {
-					// Deep copy player info
-					copiedPlayerBytes, err := json.Marshal(storedPlayerInfo)
-					if err == nil {
-						err = json.Unmarshal(copiedPlayerBytes, &playerInfo)
-						if err != nil {
-							c.hub.logger.Warnf("Failed to deep copy playerInfo for %s: %v", playerID, err)
-							playerInfo = nil // Reset on error
-						}
-					} else {
-						c.hub.logger.Warnf("Failed to marshal source playerInfo for %s for deep copy: %v", playerID, err)
-						playerInfo = nil
-					}
-				}
-
-				// Fallback if info is nil (e.g., copy failed or not found)
-				if playerInfo == nil {
-					playerInfo = map[string]interface{}{
-						"id":      playerID,
-						"name":    fmt.Sprintf("Player_%s", playerID[:4]),
-						"token":   "",
-						"emoji":   "👤",
-						"color":   "gray.500",
-						"isReady": false,
-					}
-				}
-
-				// Set isHost flag based on the reliably fetched hostID
-				playerInfo["isHost"] = (hostID != "" && playerID == hostID)
-				players = append(players, playerInfo)
-			}
-		}
-	}
-
-	// Unlock mutexes after reading/copying is done
-	c.hub.gameInfoMutex.RUnlock()
-	c.hub.playerInfoMutex.RUnlock()
-	c.hub.clientsMutex.RUnlock()
-
-	// --- Prepare and send response using the copied data ---
-
-	var maxPlayers int = 6 // Default
-	if gameInfo != nil {
-		if mpVal, ok := gameInfo["maxPlayers"]; ok {
-			if mpInt, ok := mpVal.(int); ok {
-				maxPlayers = mpInt
-			} else if mpFlt, ok := mpVal.(float64); ok {
-				maxPlayers = int(mpFlt)
-			}
-		}
-	}
-
-	// Create response message using the locally copied players and gameInfo
-	response := map[string]interface{}{
-		"type":       "active_players",
-		"players":    players, // Use the copied list
-		"gameId":     c.gameID,
-		"hostId":     hostID, // Use the reliably fetched hostID
-		"maxPlayers": maxPlayers,
-		"gameInfo":   gameInfo, // Use the copied gameInfo
-	}
-
-	// Add status, gameStarted, etc. based on the *copied* gameInfo
-	if gameInfo != nil {
-		if status, ok := gameInfo["status"].(string); ok {
-			response["status"] = status
-		}
-		if started, ok := gameInfo["gameStarted"].(bool); ok && started {
-			response["gameStarted"] = true
-			response["gamePhase"] = "playing"
-		}
-		// ... (Redis check remains the same, operates on the response map)
-		if c.hub.redisClient != nil && response["gameStarted"] == nil {
-			key := fmt.Sprintf("game:%s:started", c.gameID)
-			val, err := c.hub.redisClient.Get(c.hub.ctx, key).Result()
-			if err == nil && val == "true" {
-				response["gameStarted"] = true
-				response["gamePhase"] = "playing"
-				response["status"] = "ACTIVE"
-				// Update the copied gameInfo in the response map if needed
-				if responseGameInfo, ok := response["gameInfo"].(map[string]interface{}); ok && responseGameInfo != nil {
-					responseGameInfo["gameStarted"] = true
-					responseGameInfo["gamePhase"] = "playing"
-					responseGameInfo["status"] = "ACTIVE"
-				}
-			}
-		}
-	}
-
-	// Marshal the response (now safe from concurrent map writes)
-	responseJSON, err := json.Marshal(response)
-	if err != nil {
-		c.hub.logger.Warnf("Failed to marshal active_players response: %v", err)
-		return
-	}
-
-	// Broadcast to all clients in the game
-	c.hub.BroadcastToGame(c.gameID, responseJSON)
-
-	// Log at debug level to avoid console spam
-}
-
-// --- Add unlocked helper functions for reading info maps ---
-
-func (h *Hub) getPlayerInfo_unlocked(gameID, playerID string) map[string]interface{} {
-	// Assumes playerInfoMutex RLock is already held
-	if gameInfo, ok := h.playerInfo[strings.ToLower(gameID)]; ok {
-		if playerInfo, ok := gameInfo[playerID]; ok {
-			return playerInfo
-		}
-	}
-	return nil
-}
-
-func (h *Hub) getGameInfo_unlocked(gameID string) map[string]interface{} {
-	// Assumes gameInfoMutex RLock is already held
-	normalizedGameID := strings.ToLower(gameID)
-	if gameInfo, ok := h.gameInfo[normalizedGameID]; ok {
-		return gameInfo
-	}
-	return nil
-}
-
-// isActive checks if the client is still active based on the last pong time
-// Returns true if the client has responded to a ping within the inactivity threshold
-func (c *Client) isActive(inactivityThreshold time.Duration) bool {
-	c.pongMutex.RLock()
-	defer c.pongMutex.RUnlock()
-
-	timeSinceLastPong := time.Since(c.lastPongTime)
-	isActive := timeSinceLastPong < inactivityThreshold
-
-	// Log when a client is about to be considered inactive
-	if !isActive {
-		// Use Debug level instead of Warn to reduce log spam
-		c.hub.logger.Debugf("Client may be inactive: Game: %s, Player: %s, Session: %s, Time since last pong: %v (threshold: %v)",
-			c.gameID, c.playerID, c.sessionID, timeSinceLastPong, inactivityThreshold)
-	}
-
-	return isActive
-}
-
-// updateAllGameInfoCache updates the game info cache for all active games
-func (h *Hub) updateAllGameInfoCache() {
-	// Skip if game manager is nil
-	if h.gameManager == nil {
-		return
-	}
-
-	// Get a list of all active game IDs
+// Helper method to get all active lobby users
+func (h *Hub) GetActiveLobbyUsers() []string {
 	h.clientsMutex.RLock()
-	gameIDs := make([]string, 0, len(h.clients))
-	for gameID := range h.clients {
-		gameIDs = append(gameIDs, gameID)
+	defer h.clientsMutex.RUnlock()
+
+	const lobbyGameID = "lobby"
+	users := make([]string, 0)
+	if lobbyClients, ok := h.clients[lobbyGameID]; ok {
+		for playerID := range lobbyClients {
+			users = append(users, playerID)
+		}
 	}
-	h.clientsMutex.RUnlock()
-
-	// Update game info for each active game
-	for _, gameID := range gameIDs {
-		h.updateGameInfoCache(gameID)
-	}
-}
-
-// updateGameInfoCache updates the game info cache for a specific game
-func (h *Hub) updateGameInfoCache(gameID string) {
-	// Skip if game manager is nil
-	if h.gameManager == nil {
-		return
-	}
-
-	// Get the game from the game manager
-	game, err := h.gameManager.GetGame(gameID)
-	if err != nil {
-		return
-	}
-
-	// Create a map to store game info
-	gameInfo := make(map[string]interface{})
-
-	// Convert game struct to map using JSON marshal/unmarshal
-	gameBytes, err := json.Marshal(game)
-	if err != nil {
-		h.logger.Warnf("Failed to marshal game for cache update: %v", err)
-		return
-	}
-
-	err = json.Unmarshal(gameBytes, &gameInfo)
-	if err != nil {
-		h.logger.Warnf("Failed to unmarshal game for cache update: %v", err)
-		return
-	}
-
-	// Add additional fields needed by the WebSocket hub
-	gameInfo["hostId"] = game.HostID
-	gameInfo["currentTurn"] = game.CurrentTurn
-	gameInfo["status"] = string(game.Status)
-	gameInfo["gameStarted"] = (game.Status == models.GameStatusActive)
-
-	// Store the updated game info
-	h.storeGameInfo(gameID, gameInfo)
+	return users
 }

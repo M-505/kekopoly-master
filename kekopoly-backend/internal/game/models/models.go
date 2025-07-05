@@ -138,6 +138,8 @@ const (
 type PlayerStatus string
 
 const (
+	PlayerStatusConnected    PlayerStatus = "CONNECTED"
+	PlayerStatusReady        PlayerStatus = "READY"
 	PlayerStatusActive       PlayerStatus = "ACTIVE"
 	PlayerStatusDisconnected PlayerStatus = "DISCONNECTED"
 	PlayerStatusBankrupt     PlayerStatus = "BANKRUPT"

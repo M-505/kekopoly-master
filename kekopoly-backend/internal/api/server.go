@@ -70,10 +70,10 @@ func NewServerWithClients(cfg *config.Config, gameManager *manager.GameManager, 
 	// Set up validator
 	e.Validator = &CustomValidator{validator: validator.New()}
 
-	// Initialize Redis queue if Redis client is available
+	// Initialize Redis queue if Redis is enabled and client is available
 	var redisQueue *queue.RedisQueue
 	var err error
-	if redisClient != nil {
+	if redisClient != nil && cfg.Redis.Enabled {
 		// Get Redis address from config or use default
 		redisAddr := cfg.Redis.URI
 		if redisAddr == "" {
@@ -87,6 +87,8 @@ func NewServerWithClients(cfg *config.Config, gameManager *manager.GameManager, 
 		} else {
 			logger.Info("Redis queue initialized")
 		}
+	} else {
+		logger.Info("Redis disabled, running in single-instance mode")
 	}
 
 	// Create WebSocket Hub with message queue
@@ -232,8 +234,6 @@ func (s *Server) configureRoutes() {
 	gameGroup.POST("/:gameId/join", gameHandler.JoinGame)
 	gameGroup.POST("/:gameId/leave", gameHandler.LeaveGame)
 	gameGroup.POST("/:gameId/start", gameHandler.StartGame)
-	gameGroup.POST("/:gameId/pause", gameHandler.PauseGame)
-	gameGroup.POST("/:gameId/reset", gameHandler.ResetGame)
 	gameGroup.GET("/:gameId/state", gameHandler.GetGameState)
 	gameGroup.POST("/:gameId/sync", gameHandler.SyncGameState)
 	gameGroup.POST("/cleanup", gameHandler.CleanupStaleGames)

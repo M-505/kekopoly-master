@@ -325,21 +325,21 @@ const GameRoom = () => {
     // Add event listener for game-started custom event
     const handleGameStarted = (event) => {
       const targetGameId = event.detail?.gameId || roomId;
-      const forceNavigate = event.detail?.forceNavigate === true;
+      const fromHost = event.detail?.hostId !== currentPlayerId;
 
-      console.warn(`Game started event received. GameId: ${targetGameId}, ForceNavigate: ${forceNavigate}`);
+      // Only proceed if we're not the host and this is a host-initiated start
+      if (!fromHost) return;
 
-      // Ensure game state in Redux is properly set before navigation
+      // Update Redux state
       dispatch(setGameStarted(true));
       dispatch(setGamePhase('playing'));
-      dispatch(syncGameStatus('PLAYING'));
+      dispatch(syncGameStatus('ACTIVE'));
 
-      // Also store in localStorage for redundancy
+      // Store in localStorage
       try {
         localStorage.setItem('kekopoly_game_started', 'true');
         localStorage.setItem('kekopoly_game_id', targetGameId);
         localStorage.setItem('kekopoly_navigation_timestamp', Date.now().toString());
-        localStorage.setItem('kekopoly_force_navigate', forceNavigate ? 'true' : 'false');
       } catch (e) {
         console.warn('Could not use localStorage:', e);
       }
@@ -347,95 +347,41 @@ const GameRoom = () => {
       // Navigate to game board
       navigate(`/game/${targetGameId}`);
 
-      // If forceNavigate is true, also try window.location as a backup
-      if (forceNavigate) {
-        // Set a short timeout to allow React Router to try first
-        setTimeout(() => {
-          if (window.location.pathname.includes('/room/')) {
-            console.warn('Forcing navigation with window.location');
-            window.location.href = `/game/${targetGameId}`;
-          }
-        }, 500);
+      // Preserve socket connection during navigation
+      if (socketService) {
+        socketService.preserveSocketForNavigation();
       }
+
+      toast({
+        title: "Game Starting",
+        description: "Host has started the game. Joining game board...",
+        status: "info",
+        duration: 3000,
+        isClosable: true,
+      });
     };
 
     // Add event listener
     window.addEventListener('game-started', handleGameStarted);
 
-    // Cleanup on unmount
+    // Cleanup
     return () => {
-      delete window.navigateToGame;
       window.removeEventListener('game-started', handleGameStarted);
     };
-  }, [navigate, dispatch, roomId]);
+  }, [navigate, dispatch, roomId, currentPlayerId, socketService]);
 
   // Game state change effect
   useEffect(() => {
     // React to game state changes
+    // Only transition to game board in response to a real 'game started' event (WebSocket or custom event)
+    // Do NOT auto-navigate just because gameStarted/gamePhase are set locally
+    // This prevents premature navigation when a player joins or is selected
+    //
+    // If you want to debug, uncomment the following:
     // console.log("Game state changed - gameStarted:", gameStarted, "gamePhase:", gamePhase);
     // console.log(`Player ${currentPlayerId} checking game state. Is host: ${isHost}`);
-
-    // Get the most up-to-date state from Redux
-    const state = store.getState();
-    const gameState = state.game;
-
-    // Simplified check for game started state with additional checks
-    const effectiveGameStarted =
-      gameStarted ||
-      gameState.gameStarted ||
-      // Check localStorage as a fallback mechanism
-      localStorage.getItem('kekopoly_game_started') === 'true';
-
-    // Check if we should transition to the game board
-    // Only transition if gamePhase is explicitly set to 'playing' AND the game is actually started
-    // This prevents automatic transition when all players are ready
-    const shouldTransitionToGame =
-      effectiveGameStarted &&
-      (gamePhase === 'playing' || gameState.gamePhase === 'playing') &&
-      // Ensure we have a game_started flag in localStorage to confirm host pressed Start Game
-      localStorage.getItem('kekopoly_game_started') === 'true';
-
-    // console.log("Effective game state values:", {
-    //   gameStarted,
-    //   gamePhase,
-    //   storeGameStarted: gameState.gameStarted,
-    //   storeGamePhase: gameState.gamePhase,
-    //   effectiveGameStarted,
-    //   shouldTransitionToGame,
-    //   localStorageGameStarted: localStorage.getItem('kekopoly_game_started') === 'true'
-    // });
-
-    // Navigate if game has started AND gamePhase is 'playing'
-    if (shouldTransitionToGame && !window.location.pathname.includes('/game/')) {
-      // console.log(`[NAVIGATION] Player ${currentPlayerId} conditions met to navigate to game board`);
-      // console.log('[NAVIGATION] Full game state before navigation:', store.getState().game);
-
-      // Ensure game state is properly set before navigation
-      dispatch(setGameStarted(true));
-      dispatch(setGamePhase('playing'));
-      dispatch(syncGameStatus('PLAYING')); // Use PLAYING status to indicate actual gameplay
-
-      // Store in localStorage for redundancy
-      try {
-        localStorage.setItem('kekopoly_game_started', 'true');
-        localStorage.setItem('kekopoly_game_id', roomId);
-        localStorage.setItem('kekopoly_navigation_timestamp', Date.now().toString());
-      } catch (e) {
-        console.warn('Could not use localStorage:', e);
-      }
-
-      // Use the navigate function
-      navigate(`/game/${roomId}`);
-    } else if (effectiveGameStarted) {
-      // console.log(`[NAVIGATION] Player ${currentPlayerId} already on game board or path is incorrect`);
-      // console.log('[NAVIGATION] Current path:', window.location.pathname);
-    } else {
-      // console.log(`[NAVIGATION] Player ${currentPlayerId} not navigating to game board yet. Current state:`, {
-      //   gameStarted,
-      //   gamePhase,
-      //   effectiveGameStarted
-      // });
-    }
+    //
+    // Navigation is now handled ONLY by handleGameStarted and window.navigateToGame
   }, [gameStarted, gamePhase, navigate, roomId, currentPlayerId, isHost]);
 
 
@@ -923,15 +869,13 @@ const GameRoom = () => {
       onClose();
 
       // --- Connect to WebSocket and wait for it to open ---
-      // console.log("Attempting WebSocket connection...");
       await socketService.connect(roomId, userId, token, playerData);
-      // console.log("WebSocket connection established (initial player data passed to socketService).");
-      // ---
 
-      // --- REMOVED direct broadcast call ---
-      // socketService will send the initial player_joined message via its onopen handler.
-      // console.log("Initial broadcast responsibility transferred to socketService.onopen");
-      // ---
+      // Ensure Redux store is updated before broadcasting
+      setTimeout(() => {
+        // Broadcast host/player info to server and other clients
+        broadcastPlayerInfo(playerData);
+      }, 300);
 
       // Request player list after broadcasting (keep this, maybe with a slightly longer delay)
       setTimeout(() => {
@@ -948,6 +892,8 @@ const GameRoom = () => {
         isClosable: true,
       });
 
+      // DO NOT set gameStarted or gamePhase here. Navigation to game board is handled ONLY by game-started event.
+      // DO NOT call navigate(`/game/${roomId}`) here;
     } catch (error) {
       console.error("Error joining game or connecting WebSocket:", error);
       setConnectionStatus('error'); // Update connection status on error
@@ -1033,7 +979,7 @@ const GameRoom = () => {
     // Check if current player is the host
     if (!isHost) {
       toast({
-        title: "Permission Denied",
+        title: "Not Authorized",
         description: "Only the host can start the game",
         status: "error",
         duration: 3000,
@@ -1043,6 +989,7 @@ const GameRoom = () => {
     }
 
     // Check if all players are ready
+    const allPlayersReady = players.every((player) => player.isReady || player.id === currentPlayerId);
     if (!allPlayersReady) {
       toast({
         title: "Players Not Ready",
@@ -1066,139 +1013,53 @@ const GameRoom = () => {
       return;
     }
 
-    // console.log("[START_GAME] Starting game as host:", currentPlayerId);
-    // console.log("[START_GAME] Current hostId in Redux:", hostId);
-    // console.log("[START_GAME] Current game state before starting:", store.getState().game);
-
     try {
       // First, set the localStorage flag to indicate that the host has explicitly started the game
-      // This is critical to prevent automatic game start when all players are ready
       try {
-        // Set the game started flag for all players
         localStorage.setItem('kekopoly_game_started', 'true');
         localStorage.setItem('kekopoly_game_id', roomId);
         localStorage.setItem('kekopoly_navigation_timestamp', Date.now().toString());
-        localStorage.setItem('kekopoly_game_phase', 'playing');
-
-        // Also set the player ID in the standard format that GameBoard.jsx expects
-        localStorage.setItem('kekopoly_player_id', currentPlayerId);
-
-        // Store the auth token in the format GameBoard.jsx expects
-        const authToken = localStorage.getItem('kekopoly_token');
-        if (authToken) {
-          localStorage.setItem('kekopoly_auth_token', authToken);
-        }
-
-        // console.log('[START_GAME] Set localStorage flags to indicate host has started the game');
-        // console.log('[START_GAME] Stored player ID in standard format:', currentPlayerId);
-
-        // Broadcast a message to all clients to set their localStorage flags
-        // This ensures non-host players also have the correct flags set
-        if (socketService && socketService.socket && socketService.socket.readyState === WebSocket.OPEN) {
-          socketService.sendMessage('broadcast_game_started', {
-            gameId: roomId,
-            hostId: currentPlayerId,
-            timestamp: Date.now(),
-            forceNavigate: true
-          });
-        }
       } catch (e) {
         console.warn('[START_GAME] Could not use localStorage:', e);
       }
 
-      // Send a message to verify host status on the server before starting
-      if (socketService && socketService.socket && socketService.socket.readyState === WebSocket.OPEN) {
-        // First verify host status
-        socketService.sendMessage('verify_host', {
-          playerId: currentPlayerId,
-          gameId: roomId
-        });
-
-        // Also request host info directly
-        socketService.sendMessage('get_host', {
-          gameId: roomId
-        });
-
-        // Explicitly set game phase to 'playing' before starting the game
-        dispatch(setGamePhase('playing'));
-        dispatch(setGameStarted(true));
-
-        // Send a single game:start message to avoid duplicate messages
+      // Send start game messages to server
+      if (socketService?.socket?.readyState === WebSocket.OPEN) {
+        // Send a game:start message to server
         socketService.sendMessage('game:start', {
-          gameId: roomId,
-          hostId: currentPlayerId,
-          timestamp: Date.now(),
-          forceNavigate: true  // Add flag to indicate this should force navigation
-        });
-
-        // Also send a direct game_started message to bypass the queue
-        socketService.sendMessage('game_started', {
           gameId: roomId,
           hostId: currentPlayerId,
           timestamp: Date.now(),
           forceNavigate: true
         });
 
-        // Update the broadcast_game_started message with additional data
+        // Send broadcast_game_started to notify other players
         socketService.sendMessage('broadcast_game_started', {
           gameId: roomId,
           hostId: currentPlayerId,
           timestamp: Date.now(),
           forceNavigate: true
         });
-      } else {
-        // console.log("[START_GAME] Socket is not open, cannot send start game message");
-        // console.log("[START_GAME] Socket state:", socketService?.socket?.readyState);
       }
 
-      // Dispatch startGameAsync action
-      dispatch(startGameAsync());
-
-      // Ensure game state is updated correctly
-      dispatch({
-        type: 'game/startGameAsync/fulfilled',
-        payload: true,
-        meta: { requestId: 'game_started', arg: undefined }
-      });
-
-      // Use the action creators directly for both gameSlice files
-      // Main gameSlice - explicitly set to playing phase
+      // Update Redux state
       dispatch(setGameStarted(true));
       dispatch(setGamePhase('playing'));
-      dispatch(syncGameStatus('PLAYING')); // Use PLAYING instead of ACTIVE
+      dispatch(syncGameStatus('ACTIVE'));
 
-      // console.log('[START_GAME] Updated gameSlice states');
-
-      // console.log("[START_GAME] Game state after updates:", store.getState().game);
-
-      // Set a timeout to force navigation if the server doesn't respond
+      // Set timeout for navigation
       const gameStartTimeout = setTimeout(() => {
-        // console.log("[START_GAME] Game start timeout reached, forcing navigation");
-
-        // Check if we're still on the room page
         if (window.location.pathname.includes('/room/')) {
-          // console.log("[START_GAME] Still on room page, forcing navigation to game board");
-
-          // Force navigation to game board
           navigate(`/game/${roomId}`);
-
-          toast({
-            title: "Game Starting",
-            description: "Server response delayed. Forcing navigation to game board.",
-            status: "info",
-            duration: 3000,
-            isClosable: true,
-          });
         }
-      }, 3000); // 3 second timeout
+      }, 3000);
 
-      // Store the timeout ID in localStorage so we can clear it if navigation happens normally
+      // Store timeout ID
       try {
         localStorage.setItem('kekopoly_game_start_timeout_id', gameStartTimeout.toString());
       } catch (e) {
         console.warn("[START_GAME] Could not store timeout ID in localStorage:", e);
       }
-
     } catch (error) {
       console.error("Error starting game:", error);
       toast({

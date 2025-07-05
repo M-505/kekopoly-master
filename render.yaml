@@ -1,0 +1,37 @@
+services:
+  - name: kekopoly-backend
+    type: web
+    env: docker
+    plan: starter
+    dockerfilePath: ./kekopoly-backend/Dockerfile
+    envVars:
+      - key: MONGODB_URI
+        sync: false # This will be set manually in Render.com dashboard
+      - key: REDIS_URI
+        sync: false # Set your Redis URI in Render.com dashboard
+      - key: REDIS_PASSWORD
+        sync: false # Set your Redis password in Render.com dashboard
+      - key: JWT_SECRET
+        generateValue: true # This will generate a random value
+      - key: DEV_SKIP_JWT
+        value: "0"
+      - key: PORT
+        value: "8080"
+    healthCheckPath: /health
+    numInstances: 1
+
+  - name: kekopoly-frontend
+    type: web
+    env: static
+    buildCommand: cd kekopoly-frontend && npm install && npm run build
+    staticPublishPath: ./kekopoly-frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          name: kekopoly-backend
+          type: web
+          property: url
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -105,10 +108,43 @@ func (h *WebSocketHandler) HandleConnection(c echo.Context) error {
 	}
 	h.logger.Infof("Connection for game: %s", gameID)
 
+	// Special handling for lobby connections
+	if gameID == "lobby" {
+		return h.HandleLobbyConnection(c)
+	}
+
 	// --- Token Validation ---
-	// Prefer token from context (set by middleware if routes allow)
 	var userID string
-	if id, ok := c.Get("userID").(string); ok && id != "" {
+	devSkip := strings.ToLower(strings.TrimSpace(strings.Trim(os.Getenv("DEV_SKIP_JWT"), "\"'")))
+	if devSkip == "1" || devSkip == "true" {
+		tokenString := c.QueryParam("token")
+		if tokenString == "" {
+			h.logger.Warn("WebSocket connection rejected: Missing token in query parameter (dev mode)")
+			return echo.NewHTTPError(http.StatusUnauthorized, "Unauthorized: Missing token (dev mode)")
+		}
+		// Try to extract userId from the JWT payload (base64 decode)
+		parts := strings.Split(tokenString, ".")
+		if len(parts) == 3 {
+			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err == nil {
+				var payloadMap map[string]interface{}
+				if err := json.Unmarshal(payload, &payloadMap); err == nil {
+					if uid, ok := payloadMap["userId"].(string); ok && uid != "" {
+						userID = uid
+					} else {
+						userID = "dev-user"
+					}
+				} else {
+					userID = "dev-user"
+				}
+			} else {
+				userID = "dev-user"
+			}
+		} else {
+			userID = "dev-user"
+		}
+		h.logger.Infof("[DEV MODE] WebSocket accepted any token, userID: %s", userID)
+	} else if id, ok := c.Get("userID").(string); ok && id != "" {
 		userID = id
 		h.logger.Infof("UserID found in context: %s (JWT middleware likely ran)", userID)
 	} else {
@@ -161,13 +197,42 @@ func (h *WebSocketHandler) HandleConnection(c echo.Context) error {
 	return nil
 }
 
-// HandleLobbyConnection handles WebSocket connections for the lobby
+// HandleLobbyConnection handles WebSocket connections specifically for the lobby
 func (h *WebSocketHandler) HandleLobbyConnection(c echo.Context) error {
 	h.logger.Infof("Lobby WebSocket connection attempt received")
 
 	// --- Token Validation ---
 	var userID string
-	if id, ok := c.Get("userID").(string); ok && id != "" {
+	devSkip := strings.ToLower(strings.TrimSpace(strings.Trim(os.Getenv("DEV_SKIP_JWT"), "\"'")))
+	if devSkip == "1" || devSkip == "true" {
+		tokenString := c.QueryParam("token")
+		if tokenString == "" {
+			h.logger.Warn("Lobby WebSocket connection rejected: Missing token in query parameter (dev mode)")
+			return echo.NewHTTPError(http.StatusUnauthorized, "Unauthorized: Missing token (dev mode)")
+		}
+		// Try to extract userId from the JWT payload (base64 decode)
+		parts := strings.Split(tokenString, ".")
+		if len(parts) == 3 {
+			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err == nil {
+				var payloadMap map[string]interface{}
+				if err := json.Unmarshal(payload, &payloadMap); err == nil {
+					if uid, ok := payloadMap["userId"].(string); ok && uid != "" {
+						userID = uid
+					} else {
+						userID = "dev-user"
+					}
+				} else {
+					userID = "dev-user"
+				}
+			} else {
+				userID = "dev-user"
+			}
+		} else {
+			userID = "dev-user"
+		}
+		h.logger.Infof("[DEV MODE] Lobby WebSocket accepted any token, userID: %s", userID)
+	} else if id, ok := c.Get("userID").(string); ok && id != "" {
 		userID = id
 		h.logger.Infof("Lobby UserID found in context: %s (JWT middleware likely ran)", userID)
 	} else {
@@ -191,30 +256,25 @@ func (h *WebSocketHandler) HandleLobbyConnection(c echo.Context) error {
 	// Get session ID from query parameter
 	sessionID := c.QueryParam("sessionId")
 	if sessionID == "" {
-		h.logger.Warn("Missing sessionID in query")
+		h.logger.Warn("Missing sessionID in query for lobby connection")
 		return echo.NewHTTPError(http.StatusBadRequest, "Missing session ID")
 	}
-	h.logger.Infof("SessionID: %s", sessionID)
+	h.logger.Infof("Lobby SessionID: %s", sessionID)
 
 	// Log complete connection parameters
-	h.logger.Infof("Attempting to upgrade lobby connection - PlayerID: %s, SessionID: %s",
-		userID, sessionID)
+	h.logger.Infof("Attempting to upgrade lobby connection - PlayerID: %s, SessionID: %s", userID, sessionID)
 
-	// Upgrade HTTP connection to WebSocket with generous CORS settings
-	upgrader.CheckOrigin = func(r *http.Request) bool {
-		return true // Accept all origins for now
-	}
-
+	// Upgrade HTTP connection to WebSocket
 	conn, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
-		h.logger.Errorf("Failed to upgrade connection: %v", err)
+		h.logger.Errorf("Failed to upgrade lobby connection: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to establish WebSocket connection")
 	}
 
 	h.logger.Infof("Lobby connection successfully upgraded to WebSocket")
 
-	// Handle WebSocket connection with "lobby" as the gameID
-	h.hub.HandleWebSocketConnection(conn, "lobby", userID, sessionID)
+	// Handle WebSocket connection using special lobby game ID prefix
+	h.hub.HandleLobbyWebSocketConnection(conn, userID, sessionID)
 	h.logger.Infof("Lobby WebSocket connection handed to hub")
 
 	return nil
