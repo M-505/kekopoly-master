@@ -5,7 +5,7 @@ server:
   write_timeout: 15
 
 mongodb:
-  uri: "mongodb://mongodb:27017"
+  uri: "${MONGODB_URI}"
   database: "kekopoly"
   games_collection: "games"
   player_collection: "players"

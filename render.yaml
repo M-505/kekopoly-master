@@ -3,7 +3,7 @@ services:
     type: web
     env: docker
     plan: free
-    dockerfilePath: ./kekopoly-backend/Dockerfile
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: MONGODB_URI
         sync: false # This will be set manually in Render.com dashboard
