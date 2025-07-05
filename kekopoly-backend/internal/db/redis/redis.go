@@ -129,18 +129,22 @@ func Connect(ctx context.Context, addr string, logger ...*zap.SugaredLogger) (*r
 		defer consoleLogger.Sync()
 	}
 
-	// Create Redis client with sensible defaults
-	client := redis.NewClient(&redis.Options{
-		Addr:         addr,
-		Password:     "", // can be configured later from config
-		DB:           0,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
-		PoolSize:     10,
-		MinIdleConns: 5,
-		MaxRetries:   3, // Redis client has built-in retries for operations
-	})
+	// Parse Redis options from config or environment
+	opts, err := redis.ParseURL(addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Redis URL: %w", err)
+	}
+
+	// Override with our preferred settings
+	opts.DialTimeout = 5 * time.Second
+	opts.ReadTimeout = 3 * time.Second
+	opts.WriteTimeout = 3 * time.Second
+	opts.PoolSize = 10
+	opts.MinIdleConns = 5
+	opts.MaxRetries = 3
+
+	// Create Redis client
+	client := redis.NewClient(opts)
 
 	// Retry configuration
 	maxRetries := 5
@@ -148,7 +152,6 @@ func Connect(ctx context.Context, addr string, logger ...*zap.SugaredLogger) (*r
 	maxBackoff := 10 * time.Second
 
 	// Exponential backoff with jitter for retries
-	var err error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Create a context with timeout for the ping
 		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
