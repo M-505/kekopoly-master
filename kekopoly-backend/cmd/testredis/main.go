@@ -53,16 +53,16 @@ func main() {
 
 	// Try to set and get a value
 	fmt.Println("\nTrying to set and get a test value...")
-	
+
 	testKey := "test_connection"
 	testValue := fmt.Sprintf("Test value at %s", time.Now().Format(time.RFC3339))
-	
+
 	err = client.Set(ctx, testKey, testValue, 5*time.Minute).Err()
 	if err != nil {
 		fmt.Printf("Failed to set test value: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	// Try to get the value back
 	val, err := client.Get(ctx, testKey).Result()
 	if err != nil {

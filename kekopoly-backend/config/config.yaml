@@ -19,7 +19,7 @@ mongodb:
   maxConnIdleTime: 30
 
 redis:
-  uri: "${REDIS_URI}"
+  uri: "redis://localhost:6379"  # Default value, will be overridden by REDIS_URI environment variable
   db: 0
 
 jwt:

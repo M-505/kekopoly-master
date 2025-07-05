@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"sync"
 	"time"
 
@@ -117,7 +118,7 @@ func NewCircuitBreakerClient(client *redis.Client, breaker *CircuitBreaker, logg
 }
 
 // Connect establishes a connection to Redis with retry capabilities
-func Connect(ctx context.Context, addr string, logger ...*zap.SugaredLogger) (*redis.Client, error) {
+func Connect(ctx context.Context, configAddr string, logger ...*zap.SugaredLogger) (*redis.Client, error) {
 	// Use default logger if none provided
 	var log *zap.SugaredLogger
 	if len(logger) > 0 && logger[0] != nil {
@@ -129,19 +130,44 @@ func Connect(ctx context.Context, addr string, logger ...*zap.SugaredLogger) (*r
 		defer consoleLogger.Sync()
 	}
 
-	// Parse Redis options from config or environment
-	opts, err := redis.ParseURL(addr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse Redis URL: %w", err)
+	// First try environment variable, then fallback to config
+	addr := os.Getenv("REDIS_URI")
+	if addr == "" {
+		addr = configAddr
 	}
 
-	// Override with our preferred settings
-	opts.DialTimeout = 5 * time.Second
-	opts.ReadTimeout = 3 * time.Second
-	opts.WriteTimeout = 3 * time.Second
-	opts.PoolSize = 10
-	opts.MinIdleConns = 5
-	opts.MaxRetries = 3
+	if addr == "" {
+		return nil, fmt.Errorf("redis URI not found in environment or config")
+	}
+
+	log.Infow("Connecting to Redis", "uri", addr)
+
+	// Create Redis client with sensible defaults
+	opts := &redis.Options{
+		Addr:         addr,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		PoolSize:     10,
+		MinIdleConns: 5,
+		MaxRetries:   3,
+	}
+
+	// If the address is a full URI, parse it
+	if len(addr) > 8 && addr[0:8] == "redis://" {
+		parsed, err := redis.ParseURL(addr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse Redis URL: %w", err)
+		}
+		opts = parsed
+		// Keep our timeout and pool settings
+		opts.DialTimeout = 5 * time.Second
+		opts.ReadTimeout = 3 * time.Second
+		opts.WriteTimeout = 3 * time.Second
+		opts.PoolSize = 10
+		opts.MinIdleConns = 5
+		opts.MaxRetries = 3
+	}
 
 	// Create Redis client
 	client := redis.NewClient(opts)
@@ -152,6 +178,7 @@ func Connect(ctx context.Context, addr string, logger ...*zap.SugaredLogger) (*r
 	maxBackoff := 10 * time.Second
 
 	// Exponential backoff with jitter for retries
+	var err error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Create a context with timeout for the ping
 		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
