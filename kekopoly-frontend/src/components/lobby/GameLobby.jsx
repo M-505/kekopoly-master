@@ -332,7 +332,7 @@ const GameLobby = () => {
         isClosable: true,
       });
 
-      // Close modal and navigate to the game room
+      // Close modal and navigate to the game room using the room code (not game ID)
       onClose();
       navigate(`/room/${roomCode || gameId}`);
     } catch (error) {
@@ -459,21 +459,46 @@ const GameLobby = () => {
     }
 
     try {
+      // First, get the game details to obtain the room code
+      const gameDetails = await apiGet(`/api/v1/games/${gameId}`);
+      
       // Use our apiPost utility which handles authentication automatically
       const joinResponse = await apiPost(`/api/v1/games/${gameId}/join`, {
         walletAddress: user?.walletAddress
       });
 
       // Log response for debugging
-      // console.log('Join game response:', joinResponse);
+      console.log('Join game response:', joinResponse);
+      console.log('Game details:', gameDetails);
 
+      // Use the room code (short code) instead of the game ID for navigation
+      // This ensures consistency with the host who uses the room code
+      const roomCode = gameDetails.code || gameId;
+      
       // Set room code in Redux
-      dispatch(setRoomCode(gameId));
+      dispatch(setRoomCode(roomCode));
 
-      // Navigate to the game room
-      navigate(`/room/${gameId}`);
+      // Navigate to the game room using the room code (not the game ID)
+      navigate(`/room/${roomCode}`);
     } catch (error) {
       console.error('Error joining game:', error);
+      
+      // If getting game details failed, fall back to using gameId directly
+      if (error.message && error.message.includes('Failed to get game details')) {
+        console.warn('Falling back to gameId for navigation due to API error');
+        try {
+          const joinResponse = await apiPost(`/api/v1/games/${gameId}/join`, {
+            walletAddress: user?.walletAddress
+          });
+          
+          dispatch(setRoomCode(gameId));
+          navigate(`/room/${gameId}`);
+          return;
+        } catch (fallbackError) {
+          console.error('Fallback join also failed:', fallbackError);
+        }
+      }
+      
       toast({
         title: 'Error',
         description: 'Failed to join game. Please try again.',
