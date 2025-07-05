@@ -73,7 +73,7 @@ func NewServerWithClients(cfg *config.Config, gameManager *manager.GameManager, 
 	// Initialize Redis queue if Redis is enabled and client is available
 	var redisQueue *queue.RedisQueue
 	var err error
-	if redisClient != nil && cfg.Redis.Enabled {
+	if redisClient != nil {
 		// Get Redis address from config or use default
 		redisAddr := cfg.Redis.URI
 		if redisAddr == "" {
