@@ -74,18 +74,18 @@ func NewServerWithClients(cfg *config.Config, gameManager *manager.GameManager, 
 	var redisQueue *queue.RedisQueue
 	var err error
 	if redisClient != nil {
-		// Get Redis address from config or use default
-		redisAddr := cfg.Redis.URI
-		if redisAddr == "" {
-			redisAddr = "localhost:6379"
-		}
-
-		// Create Redis queue
-		redisQueue, err = queue.NewRedisQueue(redisAddr, logger.Desugar())
-		if err != nil {
-			logger.Warnf("Failed to initialize Redis queue: %v", err)
+		// Get Redis URI from config
+		redisURI := cfg.Redis.URI
+		if redisURI == "" {
+			logger.Warn("Redis URI not set in config")
 		} else {
-			logger.Info("Redis queue initialized")
+			// Create Redis queue
+			redisQueue, err = queue.NewRedisQueue(redisURI, logger.Desugar())
+			if err != nil {
+				logger.Warnf("Failed to initialize Redis queue: %v", err)
+			} else {
+				logger.Info("Redis queue initialized")
+			}
 		}
 	} else {
 		logger.Info("Redis disabled, running in single-instance mode")

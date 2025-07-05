@@ -38,17 +38,17 @@ type RedisQueue struct {
 }
 
 // NewRedisQueue creates a new Redis queue
-func NewRedisQueue(redisAddr string, logger *zap.Logger) (*RedisQueue, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: "", // no password set
-		DB:       0,  // use default DB
-	})
+func NewRedisQueue(redisURI string, logger *zap.Logger) (*RedisQueue, error) {
+	opt, err := redis.ParseURL(redisURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Redis URI: %w", err)
+	}
 
+	client := redis.NewClient(opt)
 	ctx := context.Background()
 
 	// Test connection
-	_, err := client.Ping(ctx).Result()
+	_, err = client.Ping(ctx).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
