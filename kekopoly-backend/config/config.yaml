@@ -12,6 +12,11 @@ mongodb:
   property_collection: "properties"
   card_collection: "cards"
   transaction_collection: "transactions"
+  retryWrites: true
+  retryReads: true
+  maxPoolSize: 50
+  minPoolSize: 5
+  maxConnIdleTime: 30
 
 redis:
   uri: "redis:6379"

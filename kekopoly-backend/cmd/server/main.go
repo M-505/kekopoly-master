@@ -38,7 +38,7 @@ func main() {
 	defer cancel()
 
 	// Initialize MongoDB connection with retry capabilities
-	mongoClient, err := mongodb.Connect(ctx, cfg.MongoDB.URI, sugar)
+	mongoClient, err := mongodb.Connect(ctx, cfg.MongoDB.GetURI(), sugar)
 	if err != nil {
 		sugar.Fatalf("Failed to connect to MongoDB: %v", err)
 	}

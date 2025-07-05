@@ -1,6 +1,10 @@
 package config
 
 import (
+	"fmt"
+	"os"
+	"strings"
+
 	"github.com/spf13/viper"
 )
 
@@ -33,11 +37,46 @@ type MongoDBConfig struct {
 	TxColl     string `mapstructure:"transaction_collection"`
 }
 
+// GetURI returns the MongoDB URI with proper scheme handling
+func (m *MongoDBConfig) GetURI() string {
+	uri := os.Getenv("MONGODB_URI")
+	if uri != "" {
+		return uri
+	}
+
+	// If no env var, use config value
+	if m.URI == "" {
+		return ""
+	}
+
+	// Ensure proper scheme
+	if !strings.HasPrefix(m.URI, "mongodb://") && !strings.HasPrefix(m.URI, "mongodb+srv://") {
+		return fmt.Sprintf("mongodb://%s", m.URI)
+	}
+	return m.URI
+}
+
 // RedisConfig holds Redis connection configuration
 type RedisConfig struct {
 	URI      string `mapstructure:"uri"`
 	Password string `mapstructure:"password"`
 	DB       int    `mapstructure:"db"`
+}
+
+// GetURI returns the Redis URI with environment variable override
+func (r *RedisConfig) GetURI() string {
+	if uri := os.Getenv("REDIS_URI"); uri != "" {
+		return uri
+	}
+	return r.URI
+}
+
+// GetPassword returns the Redis password with environment variable override
+func (r *RedisConfig) GetPassword() string {
+	if pwd := os.Getenv("REDIS_PASSWORD"); pwd != "" {
+		return pwd
+	}
+	return r.Password
 }
 
 // JWTConfig holds JWT configuration
