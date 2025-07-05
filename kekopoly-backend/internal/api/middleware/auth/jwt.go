@@ -1,0 +1,107 @@
+package auth
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/labstack/echo/v4"
+)
+
+// Claims represents the JWT claims
+type Claims struct {
+	UserID string `json:"userId"`
+	jwt.RegisteredClaims
+}
+
+// JWTMiddleware creates a JWT middleware for authentication
+func JWTMiddleware(secret string) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			// DEV PATCH: Allow any token if DEV_SKIP_JWT is set
+			if devSkip := strings.ToLower(strings.TrimSpace(strings.Trim(os.Getenv("DEV_SKIP_JWT"), "\"'"))); devSkip == "1" || devSkip == "true" {
+				authHeader := c.Request().Header.Get("Authorization")
+				if authHeader == "" {
+					return echo.NewHTTPError(http.StatusUnauthorized, "missing authorization header")
+				}
+				parts := strings.Split(authHeader, " ")
+				if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+					return echo.NewHTTPError(http.StatusUnauthorized, "invalid authorization header format")
+				}
+				// Accept any token, set dummy userID
+				c.Set("userID", "dev-user")
+				return next(c)
+			}
+
+			// Extract token from Authorization header
+			authHeader := c.Request().Header.Get("Authorization")
+			if authHeader == "" {
+				return echo.NewHTTPError(http.StatusUnauthorized, "missing authorization header")
+			}
+
+			// Check if the header has the correct format "Bearer <token>"
+			parts := strings.Split(authHeader, " ")
+			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+				return echo.NewHTTPError(http.StatusUnauthorized, "invalid authorization header format")
+			}
+
+			// Parse and validate token
+			token, err := jwt.ParseWithClaims(parts[1], &Claims{}, func(token *jwt.Token) (interface{}, error) {
+				// Validate the signing algorithm
+				if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+				}
+				return []byte(secret), nil
+			})
+
+			if err != nil {
+				return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired token")
+			}
+
+			// Check if token is valid
+			if !token.Valid {
+				return echo.NewHTTPError(http.StatusUnauthorized, "invalid token")
+			}
+
+			// Extract claims from token
+			claims, ok := token.Claims.(*Claims)
+			if !ok {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to extract claims")
+			}
+
+			// Set claims in context
+			c.Set("userID", claims.UserID)
+
+			return next(c)
+		}
+	}
+}
+
+// GenerateJWT generates a JWT token for a user
+func GenerateJWT(userID, secret string, expirationHours int) (string, error) {
+	// Create expiration time
+	expirationTime := time.Now().Add(time.Duration(expirationHours) * time.Hour)
+
+	// Create claims
+	claims := &Claims{
+		UserID: userID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+
+	// Create token with claims
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Sign token with secret
+	tokenString, err := token.SignedString([]byte(secret))
+	if err != nil {
+		return "", err
+	}
+
+	return tokenString, nil
+}
