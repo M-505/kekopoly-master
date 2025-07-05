@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -205,10 +206,43 @@ func (s *Server) configureRoutes() {
 	wsHandler := handlers.NewWebSocketHandler(s.wsHub, s.logger, s.cfg)
 	healthHandler := handlers.NewHealthHandler(s.mongoClient, s.redisClient, s.logger)
 
-	// Serve static files from the frontend build directory
-	s.echo.Static("/", "frontend/dist")
-	// Handle SPA routing - serve index.html for all non-API routes
-	s.echo.File("/*", "frontend/dist/index.html")
+	// Configure static file serving with proper MIME types
+	staticConfig := middleware.StaticConfig{
+		Root:   "frontend/dist",
+		Index:  "index.html",
+		HTML5:  true,
+		Browse: false,
+	}
+	s.echo.Use(middleware.StaticWithConfig(staticConfig))
+
+	// Add middleware to set correct Content-Type headers
+	s.echo.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			path := c.Request().URL.Path
+			switch {
+			case strings.HasSuffix(path, ".js"):
+				c.Response().Header().Set(echo.HeaderContentType, "application/javascript")
+			case strings.HasSuffix(path, ".css"):
+				c.Response().Header().Set(echo.HeaderContentType, "text/css")
+			case strings.HasSuffix(path, ".png"):
+				c.Response().Header().Set(echo.HeaderContentType, "image/png")
+			case strings.HasSuffix(path, ".jpg"), strings.HasSuffix(path, ".jpeg"):
+				c.Response().Header().Set(echo.HeaderContentType, "image/jpeg")
+			case strings.HasSuffix(path, ".svg"):
+				c.Response().Header().Set(echo.HeaderContentType, "image/svg+xml")
+			}
+			return next(c)
+		}
+	})
+
+	// SPA routing - serve index.html for all unmatched routes
+	s.echo.GET("/*", func(c echo.Context) error {
+		// Skip API routes
+		if strings.HasPrefix(c.Request().URL.Path, "/api/") {
+			return echo.NotFoundHandler(c)
+		}
+		return c.File("frontend/dist/index.html")
+	})
 
 	// Start the ping/pong monitor for inactive client detection
 	wsHandler.StartPingPongMonitor()
