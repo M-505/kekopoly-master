@@ -205,6 +205,11 @@ func (s *Server) configureRoutes() {
 	wsHandler := handlers.NewWebSocketHandler(s.wsHub, s.logger, s.cfg)
 	healthHandler := handlers.NewHealthHandler(s.mongoClient, s.redisClient, s.logger)
 
+	// Serve static files from the frontend build directory
+	s.echo.Static("/", "frontend/dist")
+	// Handle SPA routing - serve index.html for all non-API routes
+	s.echo.File("/*", "frontend/dist/index.html")
+
 	// Start the ping/pong monitor for inactive client detection
 	wsHandler.StartPingPongMonitor()
 
