@@ -166,3 +166,48 @@ export const apiDelete = async (url, options = {}) => {
 
   return await response.json();
 };
+
+/**
+ * Make a public API request (no authentication required)
+ * @param {string} url - The API endpoint URL
+ * @param {Object} options - Fetch options
+ * @returns {Promise<Response>} The fetch response
+ */
+export const publicApiRequest = async (url, options = {}) => {
+  // Set up headers without authentication
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {})
+  };
+
+  // Make the request without authentication header
+  const response = await fetch(url, {
+    ...options,
+    headers
+  });
+
+  // Handle errors
+  if (!response.ok) {
+    console.error(`Public API request failed with status ${response.status}:`, url);
+    throw new Error(`Request failed with status ${response.status}`);
+  }
+
+  return response;
+};
+
+/**
+ * Make a public POST request (no authentication required)
+ * @param {string} url - The API endpoint URL
+ * @param {Object} data - The data to send in the request body
+ * @param {Object} options - Additional fetch options
+ * @returns {Promise<any>} The parsed JSON response
+ */
+export const publicApiPost = async (url, data, options = {}) => {
+  const response = await publicApiRequest(url, {
+    method: 'POST',
+    body: JSON.stringify(data),
+    ...options
+  });
+
+  return await response.json();
+};

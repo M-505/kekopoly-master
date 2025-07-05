@@ -1,11 +1,11 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { apiPost } from '../utils/apiUtils';
+import { publicApiPost } from '../utils/apiUtils';
 
 export const login = createAsyncThunk(
   'auth/login',
   async (credentials, { rejectWithValue }) => {
     try {
-      const data = await apiPost('/api/v1/auth/login', credentials);
+      const data = await publicApiPost('/api/v1/auth/login', credentials);
       return data;
     } catch (error) {
       return rejectWithValue(error.toString());
@@ -17,7 +17,7 @@ export const register = createAsyncThunk(
   'auth/register',
   async (userData, { rejectWithValue }) => {
     try {
-      const data = await apiPost('/api/v1/auth/register', userData);
+      const data = await publicApiPost('/api/v1/auth/register', userData);
       return data;
     } catch (error) {
       return rejectWithValue(error.toString());
