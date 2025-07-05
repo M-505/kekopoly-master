@@ -173,6 +173,7 @@ func Connect(ctx context.Context, uri string, logger ...*zap.SugaredLogger) (*mo
 	}
 
 	// Create connection options with Atlas-specific settings
+	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
 	clientOptions := options.Client().
 		ApplyURI(uri).
 		SetMinPoolSize(5).
@@ -180,11 +181,16 @@ func Connect(ctx context.Context, uri string, logger ...*zap.SugaredLogger) (*mo
 		SetMaxConnIdleTime(30 * time.Second).
 		SetRetryWrites(true).
 		SetRetryReads(true).
-		SetServerSelectionTimeout(15 * time.Second). // Increased timeout
-		SetConnectTimeout(30 * time.Second).         // Increased timeout
+		SetServerSelectionTimeout(15 * time.Second).
+		SetConnectTimeout(30 * time.Second).
+		SetSocketTimeout(45 * time.Second). // Added socket timeout
+		SetMaxPoolSize(100).
+		SetMinPoolSize(5).
+		SetMaxConnecting(20).
 		SetTLSConfig(tlsConfig).
-		SetDirect(false). // Required for replica sets
-		SetReplicaSet(connString.ReplicaSet)
+		SetDirect(false).
+		SetReplicaSet(connString.ReplicaSet).
+		SetServerAPIOptions(serverAPI) // Enable Stable API
 
 	// Retry configuration
 	maxRetries := 5
