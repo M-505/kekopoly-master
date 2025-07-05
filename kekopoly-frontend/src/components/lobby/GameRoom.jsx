@@ -42,7 +42,7 @@ import {
   Spinner,
 } from '@chakra-ui/react';
 import { FaCheck, FaUserCheck, FaCopy, FaPlay, FaUserEdit, FaUserPlus, FaSpinner } from 'react-icons/fa';
-import { addPlayer, setPlayerReady } from '../../store/playerSlice';
+import { addPlayer, setPlayerReady, removePlayer } from '../../store/playerSlice';
 import socketService from '../../services/socket';
 import { store } from '../../store/store';
 import { isTokenExpired } from '../../utils/tokenUtils';
@@ -431,9 +431,14 @@ const GameRoom = () => {
   // Room validation effect - check if room exists before allowing entry
   useEffect(() => {
     const validateRoom = async () => {
-      if (!roomId || !token) return;
+      if (!roomId || !token) {
+        console.log(`[ROOM_VALIDATION] Skipping validation - roomId: ${roomId}, token: ${!!token}`);
+        return;
+      }
 
       try {
+        console.log(`[ROOM_VALIDATION] Validating room: ${roomId}`);
+        
         // Check if the room/game exists by calling the backend API
         const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'}/api/v1/games/${roomId}`, {
           headers: {
@@ -442,13 +447,38 @@ const GameRoom = () => {
           }
         });
 
+        console.log(`[ROOM_VALIDATION] API response status: ${response.status}`);
+
         if (!response.ok) {
           // Room doesn't exist or error occurred
-          console.error(`Room ${roomId} not found or inaccessible:`, response.status);
+          console.error(`[ROOM_VALIDATION] Room ${roomId} not found or inaccessible:`, response.status, response.statusText);
+          
+          // Handle different error cases
+          let errorMessage = `The room "${roomId}" does not exist or is no longer available.`;
+          
+          if (response.status === 404) {
+            errorMessage = `Game room "${roomId}" was not found. It may have been deleted or never existed.`;
+          } else if (response.status === 401 || response.status === 403) {
+            errorMessage = `Access denied to room "${roomId}". Your session may have expired.`;
+            
+            // For auth errors, redirect to login instead of lobby
+            toast({
+              title: 'Access Denied',
+              description: errorMessage + ' Redirecting to login...',
+              status: 'error',
+              duration: 5000,
+              isClosable: true,
+            });
+            
+            setTimeout(() => {
+              navigate('/login');
+            }, 2000);
+            return;
+          }
           
           toast({
             title: 'Room Not Found',
-            description: `The room "${roomId}" does not exist or is no longer available.`,
+            description: errorMessage + ' Redirecting to lobby...',
             status: 'error',
             duration: 5000,
             isClosable: true,
@@ -462,27 +492,88 @@ const GameRoom = () => {
         }
 
         // Room exists, we can proceed
-        console.log(`Room ${roomId} validated successfully`);
+        const gameData = await response.json();
+        console.log(`[ROOM_VALIDATION] Room ${roomId} validated successfully:`, gameData);
+        
+        // Check if the game is in a joinable state
+        const joinableStatuses = ['LOBBY', 'ACTIVE', 'PAUSED'];
+        const currentStatus = gameData.status;
+        
+        if (!joinableStatuses.includes(currentStatus)) {
+          console.log(`[ROOM_VALIDATION] Game ${roomId} is not joinable. Status: ${currentStatus}`);
+          
+          let statusMessage = '';
+          if (currentStatus === 'COMPLETED') {
+            statusMessage = 'This game has already finished.';
+          } else if (currentStatus === 'ABANDONED') {
+            statusMessage = 'This game has been abandoned.';
+          } else {
+            statusMessage = `This game is currently in "${currentStatus}" status and cannot be joined.`;
+          }
+          
+          toast({
+            title: 'Game Not Available',
+            description: `${statusMessage} Redirecting to lobby...`,
+            status: 'warning',
+            duration: 5000,
+            isClosable: true,
+          });
+
+          // Navigate back to lobby after a short delay
+          setTimeout(() => {
+            navigate('/lobby');
+          }, 2000);
+          return;
+        }
+        
+        console.log(`[ROOM_VALIDATION] Game ${roomId} is joinable with status: ${currentStatus}`);
+        
+        // Store room data in Redux for use by other components
+        if (gameData.code && gameData.code !== roomId) {
+          console.log(`[ROOM_VALIDATION] Room code mismatch detected. URL: ${roomId}, Actual: ${gameData.code}`);
+          
+          // Show warning about room code mismatch but don't redirect
+          toast({
+            title: 'Room Code Notice',
+            description: `You accessed this room via "${roomId}" but the actual room code is "${gameData.code}".`,
+            status: 'info',
+            duration: 3000,
+            isClosable: true,
+          });
+        }
         
       } catch (error) {
-        console.error('Error validating room:', error);
+        console.error('[ROOM_VALIDATION] Error validating room:', error);
         
-        toast({
-          title: 'Connection Error',
-          description: 'Unable to verify room status. Please check your connection and try again.',
-          status: 'error',
-          duration: 5000,
-          isClosable: true,
-        });
-
-        // Navigate back to lobby after a short delay
-        setTimeout(() => {
-          navigate('/lobby');
-        }, 2000);
+        // Handle network errors vs other errors differently
+        if (error.name === 'TypeError' && error.message.includes('fetch')) {
+          toast({
+            title: 'Connection Error',
+            description: 'Unable to connect to the server. Please check your internet connection.',
+            status: 'error',
+            duration: 5000,
+            isClosable: true,
+          });
+        } else {
+          toast({
+            title: 'Validation Error',
+            description: 'Unable to verify room status. Redirecting to lobby...',
+            status: 'error',
+            duration: 5000,
+            isClosable: true,
+          });
+          
+          setTimeout(() => {
+            navigate('/lobby');
+          }, 2000);
+        }
       }
     };
 
-    validateRoom();
+    // Add a small delay to ensure component is fully mounted
+    const timeoutId = setTimeout(validateRoom, 500);
+    
+    return () => clearTimeout(timeoutId);
   }, [roomId, token, navigate, toast]);
 
   // Effect to initialize player connection when first joining OR reconnecting after load
@@ -932,13 +1023,45 @@ const GameRoom = () => {
       // Get token data
       const tokenData = PLAYER_TOKENS.find(t => t.id === selectedToken);
 
-      // Extract user ID from JWT token
+      // Extract user ID from JWT token, but generate a unique player ID for this session
       const tokenPayload = JSON.parse(atob(token.split('.')[1]));
-      const userId = tokenPayload.userId;
+      const jwtUserId = tokenPayload.userId;
+      
+      // Check if we have a valid JWT userId (not all zeros which indicates a problem)
+      if (!jwtUserId || jwtUserId === '000000000000000000000000' || jwtUserId.length < 10) {
+        console.error('[PLAYER_REGISTRATION] Invalid JWT userId detected:', jwtUserId);
+        
+        toast({
+          title: "Authentication Error",
+          description: "Your session is invalid. Please log in again.",
+          status: "error",
+          duration: 5000,
+          isClosable: true,
+        });
+        
+        // Clear localStorage and redirect to login
+        localStorage.clear();
+        navigate('/login');
+        return;
+      }
+      
+      // Generate a unique player ID to avoid conflicts when multiple users have the same JWT userId
+      // Use a combination of JWT userId and timestamp + random string for uniqueness
+      const timestamp = Date.now().toString(36);
+      const randomStr = Math.random().toString(36).substring(2, 8);
+      const uniquePlayerId = `${jwtUserId.substring(0, 8)}_${timestamp}_${randomStr}`;
+      
+      console.log('[PLAYER_REGISTRATION] Generated unique player ID:', {
+        jwtUserId,
+        uniquePlayerId,
+        timestamp,
+        randomStr,
+        tokenValid: !isTokenExpired(token)
+      });
 
       // Create player data object with guaranteed emoji
       const playerData = {
-        id: userId, // Use the userId from JWT token
+        id: uniquePlayerId, // Use the unique player ID instead of JWT userId
         name: playerName,
         token: selectedToken || '',
         emoji: tokenData ? tokenData.emoji : '👤',  // Ensure emoji is never empty
@@ -951,29 +1074,30 @@ const GameRoom = () => {
       };
 
       // Log the token data to verify it's being set correctly
-      // console.log("Player registration with token data:", {
-      //   selectedToken,
-      //   tokenData,
-      //   resultingEmoji: playerData.emoji,
-      //   userId
-      // });
+      console.log("Player registration with token data:", {
+        selectedToken,
+        tokenData,
+        resultingEmoji: playerData.emoji,
+        uniquePlayerId,
+        jwtUserId
+      });
 
       // console.log("Adding player to Redux:", playerData);
 
       // Add player to Redux store
       dispatch(addPlayer({
-        playerId: userId, // Use the userId from JWT token
+        playerId: uniquePlayerId, // Use the unique player ID
         playerData
       }));
 
       // Save player ID to local storage for reconnection
       // roomId is already normalized at the top of the component
-      localStorage.setItem(`kekopoly_player_${roomId}`, userId);
+      localStorage.setItem(`kekopoly_player_${roomId}`, uniquePlayerId);
       localStorage.setItem(`kekopoly_player_name_${roomId}`, playerName);
       localStorage.setItem(`kekopoly_player_token_${roomId}`, selectedToken);
 
       // Force an immediate update of the local state to ensure UI updates
-      setCurrentPlayerId(userId);
+      setCurrentPlayerId(uniquePlayerId);
 
       // Force immediate re-render to show the player in the list
       // No need to create updatedPlayerData as it's handled by Redux now
@@ -986,7 +1110,57 @@ const GameRoom = () => {
       onClose();
 
       // --- Connect to WebSocket and wait for it to open ---
-      await socketService.connect(roomId, userId, token, playerData);
+      try {
+        await socketService.connect(roomId, uniquePlayerId, token, playerData);
+        
+        // Verify connection was successful
+        if (!socketService.socket || socketService.socket.readyState !== WebSocket.OPEN) {
+          throw new Error('WebSocket connection failed to establish');
+        }
+        
+        console.log('[PLAYER_REGISTRATION] WebSocket connection successful');
+        
+      } catch (connectionError) {
+        console.error('[PLAYER_REGISTRATION] WebSocket connection failed:', connectionError);
+        
+        // Remove player from Redux store since connection failed
+        // (This prevents showing the player in the UI when they're not actually connected)
+        dispatch(removePlayer(uniquePlayerId));
+        
+        // Clear localStorage
+        localStorage.removeItem(`kekopoly_player_${roomId}`);
+        localStorage.removeItem(`kekopoly_player_name_${roomId}`);
+        localStorage.removeItem(`kekopoly_player_token_${roomId}`);
+        
+        // Reset state
+        setCurrentPlayerId(null);
+        
+        // Show specific error message
+        if (connectionError.message.includes('401') || connectionError.message.includes('403')) {
+          toast({
+            title: "Authentication Failed",
+            description: "Your session has expired. Please log in again.",
+            status: "error",
+            duration: 5000,
+            isClosable: true,
+          });
+          
+          // Redirect to login for auth errors
+          setTimeout(() => {
+            navigate('/login');
+          }, 2000);
+        } else {
+          toast({
+            title: "Connection Failed",
+            description: "Unable to connect to the game room. Please try again.",
+            status: "error",
+            duration: 5000,
+            isClosable: true,
+          });
+        }
+        
+        throw connectionError; // Re-throw to be caught by outer try-catch
+      }
 
       // Ensure Redux store is updated before broadcasting
       setTimeout(() => {
