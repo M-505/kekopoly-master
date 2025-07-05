@@ -123,9 +123,9 @@ const playerSelector = (state) => {
 };
 
 const GameRoom = () => {
-  const { roomId: rawRoomId } = useParams();
+  const { gameId: rawGameId } = useParams();
   // Always normalize room code to lowercase to match server expectations
-  const roomId = rawRoomId ? rawRoomId.toLowerCase().trim() : '';
+  const roomId = rawGameId ? rawGameId.toLowerCase().trim() : '';
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const toast = useToast();
