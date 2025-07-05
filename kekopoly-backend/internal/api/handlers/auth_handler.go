@@ -39,7 +39,7 @@ type RegisterRequest struct {
 
 // LoginRequest represents a user login request
 type LoginRequest struct {
-	Email    string `json:"email" validate:"required,email"`
+	Username string `json:"username" validate:"required"`
 	Password string `json:"password" validate:"required"`
 }
 
@@ -130,18 +130,18 @@ func (h *AuthHandler) Login(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	// Retrieve user from database
-	user, err := h.userStore.GetUserByEmail(ctx, req.Email)
+	user, err := h.userStore.GetUserByUsername(ctx, req.Username)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			return echo.NewHTTPError(http.StatusUnauthorized, "Invalid email or password")
+			return echo.NewHTTPError(http.StatusUnauthorized, "Invalid username or password")
 		}
-		h.logger.Errorf("Failed to get user by email: %v", err)
+		h.logger.Errorf("Failed to get user by username: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to log in")
 	}
 
 	// Verify password hash
 	if !user.CheckPassword(req.Password) {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid email or password")
+		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid username or password")
 	}
 
 	// Generate JWT token
