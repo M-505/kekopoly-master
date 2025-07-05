@@ -12,7 +12,7 @@ import { store } from '../../store/store';
  * Establishes a WebSocket connection to the game server
  * @param {string} gameId - The ID of the game to connect to
  * @param {string} playerId - The ID of the player
- * @param {string} token - Authentication token
+ * @param {string} [token] - DEPRECATED. The token is now retrieved from the Redux store.
  * @param {Object} initialPlayerData - Initial player data to send on connection
  * @returns {Promise} - Resolves when connection is established
  */
@@ -21,7 +21,18 @@ export function connect(gameId, playerId, token, initialPlayerData) {
   const normalizedRoomId = gameId.toLowerCase().trim();
   this.gameId = normalizedRoomId;
   this.playerId = playerId;
-  this.token = token; // Store the token
+
+  // Always get the latest token from the Redux store or localStorage
+  const state = store.getState();
+  const freshToken = state.auth.token || localStorage.getItem('kekopoly_token');
+
+  if (!freshToken) {
+    const errorMessage = 'No authentication token available for WebSocket connection.';
+    logError('CONNECT', errorMessage);
+    return Promise.reject(new Error(errorMessage));
+  }
+
+  this.token = freshToken; // Store the fresh token
 
   // Check if we have stored player token data from a previous session
   try {
@@ -97,16 +108,8 @@ export function connect(gameId, playerId, token, initialPlayerData) {
     // Ensure we have a valid token
     if (!this.token) {
       logError('CONNECT', 'No token available for WebSocket connection');
-      // Try to get token from localStorage as fallback
-      const storedToken = localStorage.getItem('kekopoly_auth_token');
-      if (storedToken) {
-        log('CONNECT', 'Using token from localStorage as fallback');
-        this.token = storedToken;
-      } else {
-        logError('CONNECT', 'No token available in localStorage either');
-        reject(new Error('No authentication token available for WebSocket connection'));
-        return;
-      }
+      reject(new Error('No authentication token available for WebSocket connection'));
+      return;
     }
 
     // Ensure token is properly formatted for Authorization header

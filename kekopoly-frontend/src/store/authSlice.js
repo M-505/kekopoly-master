@@ -5,7 +5,7 @@ export const login = createAsyncThunk(
   'auth/login',
   async (credentials, { rejectWithValue }) => {
     try {
-      const data = await apiPost('/api/auth/login', credentials);
+      const data = await apiPost('/api/v1/auth/login', credentials);
       return data;
     } catch (error) {
       return rejectWithValue(error.toString());
@@ -17,7 +17,7 @@ export const register = createAsyncThunk(
   'auth/register',
   async (userData, { rejectWithValue }) => {
     try {
-      const data = await apiPost('/api/auth/register', userData);
+      const data = await apiPost('/api/v1/auth/register', userData);
       return data;
     } catch (error) {
       return rejectWithValue(error.toString());
@@ -39,7 +39,7 @@ const authSlice = createSlice({
   name: 'auth',
   initialState,
   reducers: {
-    disconnect: (state) => {
+    logout: (state) => {
       state.isAuthenticated = false;
       state.token = null;
       state.user = null;
@@ -84,5 +84,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { disconnect } = authSlice.actions;
+export const { logout } = authSlice.actions;
 export default authSlice.reducer;

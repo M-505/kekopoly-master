@@ -72,40 +72,26 @@ export const apiRequest = async (url, options = {}) => {
     headers
   });
 
-  // Handle authentication errors
+  // Handle authentication errors (e.g., token expired)
   if (response.status === 401) {
-    console.error('Authentication failed for API request:', url);
-
-    // Try to refresh the token from localStorage
-    const refreshedToken = localStorage.getItem('kekopoly_token');
-    if (refreshedToken && refreshedToken !== token) {
-      // console.log('Found different token in localStorage, retrying request with new token');
-
-      // Update Redux store with the new token if available
-      const store = getReduxStore();
-      if (store && store.dispatch) {
-        store.dispatch({ type: 'auth/setToken', payload: refreshedToken });
-      }
-
-      // Retry the request with the new token
-      const retryHeaders = {
-        'Authorization': refreshedToken.startsWith('Bearer ') ? refreshedToken : `Bearer ${refreshedToken}`,
-        'Content-Type': 'application/json',
-        ...(options.headers || {})
-      };
-
-      const retryResponse = await fetch(url, {
-        ...options,
-        headers: retryHeaders
-      });
-
-      if (retryResponse.ok) {
-        // console.log('Request succeeded with refreshed token');
-        return retryResponse;
-      }
+    console.error('Authentication failed (401). Logging out.');
+    
+    const store = getReduxStore();
+    if (store) {
+      // Dispatch logout action to clear user session
+      store.dispatch({ type: 'auth/logout' });
     }
-
-    throw new Error('Authentication required');
+    
+    // Redirect to login page
+    // The page will reload, and the routing logic will handle showing the login screen.
+    window.location.href = '/login'; 
+    
+    // Throw an error to stop the promise chain of the original caller.
+    const error = new Error('Session expired. Please log in again.');
+    // Attach the response so the caller can inspect it if needed
+    // @ts-ignore
+    error.response = response;
+    throw error;
   }
 
   // Handle other errors
