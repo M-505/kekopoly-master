@@ -12,7 +12,6 @@ import {
   Text,
   Alert,
   AlertIcon,
-  Divider,
   useToast,
   InputGroup,
   InputRightElement,
@@ -137,18 +136,6 @@ const LoginForm = ({ initialMode = 'login' }) => {
             </Button>
           </VStack>
         </form>
-        
-        <Divider my={6} />
-        
-        <Button
-          colorScheme="blue"
-          variant="outline"
-          onClick={handleConnectWallet}
-          isLoading={loading && walletAddress}
-          loadingText="Connecting..."
-        >
-          Connect with Wallet
-        </Button>
         
         <Text textAlign="center" mt={4}>
           {isLogin ? "Don't have an account?" : "Already have an account?"}
