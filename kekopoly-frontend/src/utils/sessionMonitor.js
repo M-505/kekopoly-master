@@ -2,7 +2,7 @@
  * Session Monitor - Monitors JWT token expiration and handles session renewal
  */
 
-import { isTokenExpired, getTokenTimeRemaining } from './tokenUtils';
+import { isTokenExpired, getTokenTimeRemaining, isValidJWTFormat } from './tokenUtils';
 
 class SessionMonitor {
   constructor() {
@@ -11,6 +11,7 @@ class SessionMonitor {
     this.onSessionWarning = null;
     this.warningThreshold = 300; // 5 minutes in seconds
     this.warningShown = false;
+    this.isPaused = false; // Add pause functionality
   }
 
   /**
@@ -46,11 +47,26 @@ class SessionMonitor {
    * Check the current session status
    */
   checkSession() {
+    // Skip checking if paused
+    if (this.isPaused) {
+      return;
+    }
+    
     const token = localStorage.getItem('kekopoly_token');
     
     if (!token) {
       if (this.onSessionExpired) {
         this.onSessionExpired('No token found');
+      }
+      return;
+    }
+
+    // First check if token format is valid
+    if (!isValidJWTFormat(token)) {
+      console.warn('Invalid JWT format detected, clearing token');
+      localStorage.removeItem('kekopoly_token');
+      if (this.onSessionExpired) {
+        this.onSessionExpired('Invalid token format');
       }
       return;
     }
@@ -82,6 +98,31 @@ class SessionMonitor {
    */
   resetWarning() {
     this.warningShown = false;
+  }
+
+  /**
+   * Pause session monitoring temporarily
+   */
+  pause() {
+    this.isPaused = true;
+  }
+
+  /**
+   * Resume session monitoring
+   */
+  resume() {
+    this.isPaused = false;
+  }
+
+  /**
+   * Temporarily pause session monitoring for a duration
+   * @param {number} durationMs - Duration to pause in milliseconds
+   */
+  pauseFor(durationMs = 5000) {
+    this.pause();
+    setTimeout(() => {
+      this.resume();
+    }, durationMs);
   }
 }
 

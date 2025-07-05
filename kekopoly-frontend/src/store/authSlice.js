@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import { publicApiPost } from '../utils/apiUtils';
+import { isValidJWTFormat } from '../utils/tokenUtils';
 
 export const login = createAsyncThunk(
   'auth/login',
@@ -27,10 +28,20 @@ export const register = createAsyncThunk(
 
 const storedToken = localStorage.getItem('kekopoly_token');
 
+// Validate the stored token format before using it
+const validToken = storedToken && isValidJWTFormat(storedToken) ? storedToken : null;
+
+// If we had an invalid token, clean it up
+if (storedToken && !validToken) {
+  console.warn('Invalid JWT format in localStorage, cleaning up');
+  localStorage.removeItem('kekopoly_token');
+  localStorage.removeItem('kekopoly_user');
+}
+
 const initialState = {
-  isAuthenticated: !!storedToken,
-  token: storedToken,
-  user: storedToken ? JSON.parse(localStorage.getItem('kekopoly_user') || '{}') : null,
+  isAuthenticated: !!validToken,
+  token: validToken,
+  user: validToken ? JSON.parse(localStorage.getItem('kekopoly_user') || '{}') : null,
   error: null,
   loading: false,
 };
@@ -55,11 +66,18 @@ const authSlice = createSlice({
       })
       .addCase(login.fulfilled, (state, action) => {
         state.loading = false;
-        state.isAuthenticated = true;
-        state.token = action.payload.token;
-        state.user = action.payload;
-        localStorage.setItem('kekopoly_token', action.payload.token);
-        localStorage.setItem('kekopoly_user', JSON.stringify(action.payload));
+        
+        // Validate token format before storing
+        if (action.payload.token && isValidJWTFormat(action.payload.token)) {
+          state.isAuthenticated = true;
+          state.token = action.payload.token;
+          state.user = action.payload;
+          localStorage.setItem('kekopoly_token', action.payload.token);
+          localStorage.setItem('kekopoly_user', JSON.stringify(action.payload));
+        } else {
+          console.error('Received invalid JWT token from login');
+          state.error = 'Invalid authentication token received';
+        }
       })
       .addCase(login.rejected, (state, action) => {
         state.loading = false;
@@ -71,11 +89,18 @@ const authSlice = createSlice({
       })
       .addCase(register.fulfilled, (state, action) => {
         state.loading = false;
-        state.isAuthenticated = true;
-        state.token = action.payload.token;
-        state.user = action.payload;
-        localStorage.setItem('kekopoly_token', action.payload.token);
-        localStorage.setItem('kekopoly_user', JSON.stringify(action.payload));
+        
+        // Validate token format before storing
+        if (action.payload.token && isValidJWTFormat(action.payload.token)) {
+          state.isAuthenticated = true;
+          state.token = action.payload.token;
+          state.user = action.payload;
+          localStorage.setItem('kekopoly_token', action.payload.token);
+          localStorage.setItem('kekopoly_user', JSON.stringify(action.payload));
+        } else {
+          console.error('Received invalid JWT token from registration');
+          state.error = 'Invalid authentication token received';
+        }
       })
       .addCase(register.rejected, (state, action) => {
         state.loading = false;

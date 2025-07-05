@@ -43,6 +43,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { setRoomCode } from '../../store/gameSlice';
 import socketService from '../../services/socket';
 import { apiGet, apiPost } from '../../utils/apiUtils';
+import sessionMonitor from '../../utils/sessionMonitor';
 
 // Add function to prompt for password
 const useCleanupPrompt = () => {
@@ -299,6 +300,9 @@ const GameLobby = () => {
     setIsCreatingGame(true);
 
     try {
+      // Pause session monitoring during game creation to prevent interference
+      sessionMonitor.pauseFor(10000); // Pause for 10 seconds
+      
       // Use our apiPost utility which handles authentication automatically
       const data = await apiPost('/api/v1/games', {
         gameName: newGameName,
@@ -330,7 +334,7 @@ const GameLobby = () => {
 
       // Close modal and navigate to the game room
       onClose();
-      navigate(`/room/${gameId}`);
+      navigate(`/room/${roomCode || gameId}`);
     } catch (error) {
       console.error('Error creating game:', error);
       toast({
@@ -371,6 +375,9 @@ const GameLobby = () => {
     }
 
     try {
+      // Pause session monitoring during game join to prevent interference
+      sessionMonitor.pauseFor(10000); // Pause for 10 seconds
+      
       // Use our apiGet utility which handles authentication automatically
       const gameData = await apiGet(`/api/v1/games/${roomCode}`);
 

@@ -46,6 +46,7 @@ import { addPlayer, setPlayerReady } from '../../store/playerSlice';
 import socketService from '../../services/socket';
 import { store } from '../../store/store';
 import { isTokenExpired } from '../../utils/tokenUtils';
+import sessionMonitor from '../../utils/sessionMonitor';
 
 // Available tokens for players to choose from
 const PLAYER_TOKENS = [
@@ -832,6 +833,9 @@ const GameRoom = () => {
     setIsJoining(true);
 
     try {
+      // Pause session monitoring during player registration to prevent interference
+      sessionMonitor.pauseFor(10000); // Pause for 10 seconds
+      
       // Get token data
       const tokenData = PLAYER_TOKENS.find(t => t.id === selectedToken);
 

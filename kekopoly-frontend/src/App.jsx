@@ -16,6 +16,7 @@ import { connectSuccess } from './store/authSlice';
 import LoginForm from './components/auth/LoginForm';
 import ProtectedRoute from './components/auth/ProtectedRoute';
 import sessionMonitor from './utils/sessionMonitor';
+import { isValidJWTFormat } from './utils/tokenUtils';
 
 function App() {
   const gameState = useSelector((state) => state.game);
@@ -71,6 +72,17 @@ function App() {
   // Check localStorage for game state on component mount
   useEffect(() => {
     try {
+      // First, validate the auth token format and clean up if invalid
+      const authToken = localStorage.getItem('kekopoly_token');
+      if (authToken && !isValidJWTFormat(authToken)) {
+        console.warn('Invalid JWT format detected in localStorage, cleaning up');
+        localStorage.removeItem('kekopoly_token');
+        localStorage.removeItem('kekopoly_user');
+        // Dispatch logout to clear Redux state
+        dispatch({ type: 'auth/logout' });
+        return; // Exit early, don't process game state
+      }
+
       const storedGameStarted = localStorage.getItem('kekopoly_game_started') === 'true';
       const storedGameId = localStorage.getItem('kekopoly_game_id');
       const forceRedirect = localStorage.getItem('kekopoly_force_redirect') === 'true';
