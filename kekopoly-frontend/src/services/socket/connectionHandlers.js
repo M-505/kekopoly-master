@@ -126,11 +126,12 @@ export function connect(gameId, playerId, token, initialPlayerData) {
     const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.hostname === 'localhost' ? 'localhost:8080' : window.location.host;
 
-    // Construct WebSocket URL with only sessionId parameter
-    const wsUrl = `${socketProtocol}//${host}/ws/${this.gameId}?sessionId=${this.sessionId}`;
+    // Construct WebSocket URL with both sessionId and token parameters
+    // We pass token in query param as fallback for browsers that don't support WebSocket headers
+    const wsUrl = `${socketProtocol}//${host}/ws/${this.gameId}?sessionId=${this.sessionId}&token=${encodeURIComponent(tokenValue)}`;
     log('CONNECT', `Connecting to WebSocket URL: ${wsUrl}`);
-
-    // Store the token for headers
+    
+    // Store the token for the Authorization header
     this.authToken = tokenValue;
 
     this.onConnectionChange('connecting');
@@ -145,12 +146,17 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         }
       }
 
-      // Create new WebSocket connection with authorization header
-      this.socket = new WebSocket(wsUrl, [], {
-        headers: {
-          'Authorization': this.authToken
+      // Create new WebSocket connection
+      this.socket = new WebSocket(wsUrl);
+      
+      // Set the Authorization header if supported by the browser
+      if (typeof this.socket.setRequestHeader === 'function') {
+        try {
+          this.socket.setRequestHeader('Authorization', this.authToken);
+        } catch (e) {
+          logWarning('CONNECT', 'Could not set WebSocket Authorization header, falling back to query parameter', e);
         }
-      });
+      }
 
       // Clear previous listeners to avoid duplicates
       this.socket.onopen = null;
@@ -165,6 +171,16 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         log('CONNECT', `WebSocket connection opened at ${timestamp}`);
         log('CONNECT', `Connection details - GameID: ${this.gameId}, PlayerID: ${this.playerId}, SessionID: ${this.sessionId}`);
         log('CONNECT', `Token used (prefix only): ${this.token ? this.token.substring(0, 10) + '...' : 'none'}`);
+
+        // Send auth message immediately after connection
+        if (this.authToken) {
+          try {
+            this.sendMessage('auth', { token: this.authToken });
+            log('CONNECT', 'Sent authentication message');
+          } catch (e) {
+            logWarning('CONNECT', 'Failed to send auth message:', e);
+          }
+        }
 
         // Store successful connection info in localStorage for recovery
         try {
