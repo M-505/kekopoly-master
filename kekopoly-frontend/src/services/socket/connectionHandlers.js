@@ -109,10 +109,10 @@ export function connect(gameId, playerId, token, initialPlayerData) {
       }
     }
 
-    // Ensure token is properly formatted and URI encoded
+    // Ensure token is properly formatted for Authorization header
     let tokenValue = this.token;
-    if (tokenValue.startsWith('Bearer ')) {
-      tokenValue = tokenValue.substring(7);
+    if (!tokenValue.startsWith('Bearer ')) {
+      tokenValue = `Bearer ${tokenValue}`;
     }
 
     // Double check that token is not empty after processing
@@ -122,15 +122,16 @@ export function connect(gameId, playerId, token, initialPlayerData) {
       return;
     }
 
-    const encodedToken = encodeURIComponent(tokenValue);
-
     // Use protocol based on current page protocol (ws or wss)
     const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.hostname === 'localhost' ? 'localhost:8080' : window.location.host;
 
-    // Construct WebSocket URL with all required parameters
-    const wsUrl = `${socketProtocol}//${host}/ws/${this.gameId}?sessionId=${this.sessionId}&token=${encodedToken}`;
-    log('CONNECT', `Connecting to WebSocket URL: ${wsUrl.substring(0, wsUrl.indexOf('?'))}?sessionId=${this.sessionId}&token=***`);
+    // Construct WebSocket URL with only sessionId parameter
+    const wsUrl = `${socketProtocol}//${host}/ws/${this.gameId}?sessionId=${this.sessionId}`;
+    log('CONNECT', `Connecting to WebSocket URL: ${wsUrl}`);
+
+    // Store the token for headers
+    this.authToken = tokenValue;
 
     this.onConnectionChange('connecting');
 
@@ -144,8 +145,12 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         }
       }
 
-      // Create new WebSocket connection
-      this.socket = new WebSocket(wsUrl);
+      // Create new WebSocket connection with authorization header
+      this.socket = new WebSocket(wsUrl, [], {
+        headers: {
+          'Authorization': this.authToken
+        }
+      });
 
       // Clear previous listeners to avoid duplicates
       this.socket.onopen = null;
