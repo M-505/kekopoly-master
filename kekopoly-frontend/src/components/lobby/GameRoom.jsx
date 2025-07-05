@@ -45,6 +45,7 @@ import { FaCheck, FaUserCheck, FaCopy, FaPlay, FaUserEdit, FaUserPlus, FaSpinner
 import { addPlayer, setPlayerReady } from '../../store/playerSlice';
 import socketService from '../../services/socket';
 import { store } from '../../store/store';
+import { isTokenExpired } from '../../utils/tokenUtils';
 
 // Available tokens for players to choose from
 const PLAYER_TOKENS = [
@@ -130,7 +131,43 @@ const GameRoom = () => {
   const { isOpen, onOpen, onClose } = useDisclosure();
 
   // Get auth token from Redux store
-  const { token } = useSelector((state) => state.auth);
+  const { token, user } = useSelector((state) => state.auth);
+
+  // Check for session expiration on component mount and when token changes
+  useEffect(() => {
+    if (!token || isTokenExpired(token)) {
+      console.warn('Session expired or no token available');
+      toast({
+        title: "Session Expired",
+        description: "Your session has expired. Please log in again.",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+      });
+      
+      // Clear any game-related localStorage items
+      localStorage.removeItem('kekopoly_game_started');
+      localStorage.removeItem('kekopoly_game_id');
+      
+      // Redirect to login
+      navigate('/login');
+      return;
+    }
+
+    // Validate roomId
+    if (!roomId || roomId === 'null' || roomId === 'undefined') {
+      console.error('Invalid roomId in GameRoom:', roomId);
+      toast({
+        title: "Invalid Room",
+        description: "Invalid room ID. Redirecting to lobby.",
+        status: "error",
+        duration: 3000,
+        isClosable: true,
+      });
+      navigate('/lobby');
+      return;
+    }
+  }, [token, roomId, navigate, toast]);
 
   // Use the player selector with memoization
   const players = useSelector(playerSelector, shallowEqual);
@@ -299,27 +336,7 @@ const GameRoom = () => {
   useEffect(() => {
     // Expose navigate function to window object for socketService to use
     window.navigateToGame = (gameId) => {
-      // Use the passed gameId or default to roomId from URL
-      const targetGameId = gameId || roomId;
-
-      // Ensure game state in Redux is properly set before navigation
-      dispatch(setGameStarted(true));
-      dispatch(setGamePhase('playing'));
-      dispatch(syncGameStatus('PLAYING'));
-
-      // Use react-router navigation
-      navigate(`/game/${targetGameId}`);
-
-      // Also store in localStorage for redundancy
-      try {
-        localStorage.setItem('kekopoly_game_started', 'true');
-        localStorage.setItem('kekopoly_game_id', targetGameId);
-        localStorage.setItem('kekopoly_navigation_timestamp', Date.now().toString());
-      } catch (e) {
-        console.warn('Could not use localStorage:', e);
-      }
-
-      return true;
+      return safeNavigateToGame(navigate, gameId || roomId, dispatch, toast);
     };
 
     // Add event listener for game-started custom event
@@ -471,8 +488,11 @@ const GameRoom = () => {
 
     // Expose navigate function to window object for WebSocket callbacks
     window.navigateToGame = (gameId) => {
-      // console.log(`[NAVIGATION] Navigating to game board: /game/${gameId}`);
-      navigate(`/game/${gameId}`);
+      if (!gameId || gameId === 'null' || gameId === 'undefined') {
+        console.error('[NAVIGATION] Invalid gameId provided:', gameId);
+        return false;
+      }
+      return safeNavigateToGame(navigate, gameId, dispatch, toast);
     };
 
     return () => {
@@ -1050,7 +1070,7 @@ const GameRoom = () => {
       // Set timeout for navigation
       const gameStartTimeout = setTimeout(() => {
         if (window.location.pathname.includes('/room/')) {
-          navigate(`/game/${roomId}`);
+          safeNavigateToGame(navigate, roomId, dispatch, toast);
         }
       }, 3000);
 
@@ -1272,7 +1292,7 @@ const GameRoom = () => {
               }
 
               // Navigate to game board
-              navigate(`/game/${roomId}`);
+              safeNavigateToGame(navigate, roomId, dispatch, toast);
 
               // Preserve socket connection for navigation
               if (socketService) {
@@ -1318,7 +1338,7 @@ const GameRoom = () => {
             }
 
             // Try multiple navigation methods
-            navigate(`/game/${roomId}`);
+            safeNavigateToGame(navigate, roomId, dispatch, toast);
 
             // Preserve socket connection
             if (socketService) {
@@ -1417,7 +1437,7 @@ const GameRoom = () => {
 
             // Force navigation for non-host players
             // console.log('[NON_HOST_NAVIGATION] Forcing navigation to game board');
-            navigate(`/game/${roomId}`);
+            safeNavigateToGame(navigate, roomId, dispatch, toast);
 
             // Preserve socket connection for navigation
             if (socketService) {

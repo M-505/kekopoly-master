@@ -490,6 +490,26 @@ const GameBoard = React.memo(() => {
 
     // Get game ID from URL
     const gameId = window.location.pathname.split('/').pop();
+    
+    // Validate gameId
+    if (!gameId || gameId === 'null' || gameId === 'undefined' || gameId.trim() === '') {
+      console.error('[WEBSOCKET_TRANSITION] Invalid or missing gameId in URL:', gameId);
+      toast({
+        title: "Invalid Game",
+        description: "Invalid game ID in URL. Redirecting to lobby.",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+      });
+      
+      // Clear game-related localStorage items
+      localStorage.removeItem('kekopoly_game_started');
+      localStorage.removeItem('kekopoly_game_id');
+      
+      // Redirect to lobby
+      window.location.href = '/lobby';
+      return;
+    }
 
     // Clear any game start timeout
     try {
@@ -916,6 +936,26 @@ const GameBoard = React.memo(() => {
 
         // Try multiple sources for gameId with path having highest priority
         const gameId = pathGameId || queryGameId || currentPlayerData?.gameId || localStorage.getItem('kekopoly_game_id');
+        
+        // Validate gameId before proceeding
+        if (!gameId || gameId === 'null' || gameId === 'undefined' || gameId.trim() === '') {
+          console.error('[SOCKET_INIT] Invalid or missing gameId:', { pathGameId, queryGameId, currentPlayerData: currentPlayerData?.gameId });
+          toast({
+            title: "Connection Error",
+            description: "Cannot connect to game: Invalid game ID. Redirecting to lobby.",
+            status: "error",
+            duration: 5000,
+            isClosable: true,
+          });
+          
+          // Clear game-related localStorage items
+          localStorage.removeItem('kekopoly_game_started');
+          localStorage.removeItem('kekopoly_game_id');
+          
+          // Redirect to lobby
+          window.location.href = '/lobby';
+          return;
+        }
 
         // Try multiple sources for playerId
         const playerId = currentPlayerData?.id || localStorage.getItem('kekopoly_player_id');

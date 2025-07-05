@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import {
   Box,
+  useToast,
 } from '@chakra-ui/react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import GameBoard from './components/game/GameBoard';
@@ -14,6 +15,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { connectSuccess } from './store/authSlice';
 import LoginForm from './components/auth/LoginForm';
 import ProtectedRoute from './components/auth/ProtectedRoute';
+import sessionMonitor from './utils/sessionMonitor';
 
 function App() {
   const gameState = useSelector((state) => state.game);
@@ -22,9 +24,49 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const dispatch = useDispatch();
+  const toast = useToast();
 
   // Add checked state to prevent redirect loop
   const [checked, setChecked] = React.useState(false);
+
+  // Set up session monitoring
+  useEffect(() => {
+    if (isAuthenticated) {
+      sessionMonitor.start(
+        (reason) => {
+          console.warn('Session expired:', reason);
+          // Dispatch logout to clear session
+          dispatch({ type: 'auth/logout' });
+          
+          toast({
+            title: "Session Expired",
+            description: "Your session has expired. Please log in again.",
+            status: "warning",
+            duration: 5000,
+            isClosable: true,
+          });
+          
+          navigate('/login');
+        },
+        (timeRemaining) => {
+          const minutes = Math.floor(timeRemaining / 60);
+          toast({
+            title: "Session Expiring Soon",
+            description: `Your session will expire in ${minutes} minutes. Please save your progress.`,
+            status: "warning",
+            duration: 8000,
+            isClosable: true,
+          });
+        }
+      );
+    } else {
+      sessionMonitor.stop();
+    }
+
+    return () => {
+      sessionMonitor.stop();
+    };
+  }, [isAuthenticated, dispatch, navigate, toast]);
 
   // Check localStorage for game state on component mount
   useEffect(() => {

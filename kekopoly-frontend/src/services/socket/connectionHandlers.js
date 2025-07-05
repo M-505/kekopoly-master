@@ -7,6 +7,7 @@
 
 import { log, logError, logWarning } from '../../utils/logger';
 import { store } from '../../store/store';
+import { isTokenExpired } from '../../utils/tokenUtils';
 
 /**
  * Establishes a WebSocket connection to the game server
@@ -17,6 +18,19 @@ import { store } from '../../store/store';
  * @returns {Promise} - Resolves when connection is established
  */
 export function connect(gameId, playerId, token, initialPlayerData) {
+  // Validate inputs
+  if (!gameId || gameId === 'null' || gameId === 'undefined') {
+    const errorMessage = `Invalid gameId provided for WebSocket connection: ${gameId}`;
+    logError('CONNECT', errorMessage);
+    return Promise.reject(new Error(errorMessage));
+  }
+
+  if (!playerId || playerId === 'null' || playerId === 'undefined') {
+    const errorMessage = `Invalid playerId provided for WebSocket connection: ${playerId}`;
+    logError('CONNECT', errorMessage);
+    return Promise.reject(new Error(errorMessage));
+  }
+
   // Ensure roomId is lowercase
   const normalizedRoomId = gameId.toLowerCase().trim();
   this.gameId = normalizedRoomId;
@@ -26,9 +40,26 @@ export function connect(gameId, playerId, token, initialPlayerData) {
   const state = store.getState();
   const freshToken = state.auth.token || localStorage.getItem('kekopoly_token');
 
-  if (!freshToken) {
+  if (!freshToken || freshToken === 'null' || freshToken === 'undefined') {
     const errorMessage = 'No authentication token available for WebSocket connection.';
     logError('CONNECT', errorMessage);
+    
+    // Don't automatically dispatch logout - let the user continue
+    // The token might be temporarily unavailable due to a race condition
+    
+    return Promise.reject(new Error(errorMessage));
+  }
+
+  // Check if token is expired
+  if (isTokenExpired(freshToken)) {
+    const errorMessage = 'Authentication token has expired.';
+    logError('CONNECT', errorMessage);
+    
+    // Only dispatch logout if the token is truly expired (not just a parsing error)
+    if (store && store.dispatch) {
+      store.dispatch({ type: 'auth/logout' });
+    }
+    
     return Promise.reject(new Error(errorMessage));
   }
 

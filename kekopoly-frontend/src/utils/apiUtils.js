@@ -2,6 +2,8 @@
  * API Utilities for making authenticated requests
  */
 
+import { isTokenExpired } from './tokenUtils';
+
 /**
  * Helper function to safely access the Redux store
  * @returns {any} The Redux store or null if not available
@@ -54,9 +56,31 @@ export const getAuthToken = () => {
 export const apiRequest = async (url, options = {}) => {
   const token = getAuthToken();
 
-  if (!token) {
-    console.error('No authentication token available for API request');
+  // Enhanced token validation
+  if (!token || token === 'null' || token === 'undefined' || token === 'Bearer null' || token === 'Bearer undefined') {
+    console.error('No valid authentication token available for API request');
+    
+    // Only clear invalid token from storage, but don't automatically logout
+    // The user might be in the middle of logging in
+    if (token === 'null' || token === 'undefined' || token === 'Bearer null' || token === 'Bearer undefined') {
+      localStorage.removeItem('kekopoly_token');
+    }
+    
     throw new Error('Authentication required');
+  }
+
+  // Check if token is expired before making the request
+  if (isTokenExpired(token)) {
+    console.warn('Authentication token has expired');
+    
+    // Clear expired session
+    if (store && store.dispatch) {
+      store.dispatch({ type: 'auth/logout' });
+    }
+    localStorage.removeItem('kekopoly_token');
+    localStorage.removeItem('kekopoly_user');
+    
+    throw new Error('Session expired. Please log in again.');
   }
 
   // Set up headers with authentication
@@ -74,20 +98,29 @@ export const apiRequest = async (url, options = {}) => {
 
   // Handle authentication errors (e.g., token expired)
   if (response.status === 401) {
-    console.error('Authentication failed (401). Logging out.');
+    console.error('Authentication failed (401). Checking if token is actually expired...');
     
-    const store = getReduxStore();
-    if (store) {
-      // Dispatch logout action to clear user session
-      store.dispatch({ type: 'auth/logout' });
+    // Check if the token is actually expired before clearing it
+    const token = getAuthToken();
+    const shouldLogout = !token || isTokenExpired(token);
+    
+    if (!shouldLogout) {
+      console.warn('Token appears valid but server returned 401. Not logging out automatically.');
     }
     
-    // Redirect to login page
-    // The page will reload, and the routing logic will handle showing the login screen.
-    window.location.href = '/login'; 
+    if (shouldLogout) {
+      const store = getReduxStore();
+      if (store) {
+        // Dispatch logout action to clear user session
+        store.dispatch({ type: 'auth/logout' });
+      }
+      
+      // Redirect to login page
+      window.location.href = '/login'; 
+    }
     
     // Throw an error to stop the promise chain of the original caller.
-    const error = new Error('Session expired. Please log in again.');
+    const error = new Error(shouldLogout ? 'Session expired. Please log in again.' : 'Authentication failed. Please try again.');
     // Attach the response so the caller can inspect it if needed
     // @ts-ignore
     error.response = response;
