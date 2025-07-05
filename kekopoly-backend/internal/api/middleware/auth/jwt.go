@@ -36,20 +36,25 @@ func JWTMiddleware(secret string) echo.MiddlewareFunc {
 				return next(c)
 			}
 
-			// Extract token from Authorization header
+			// Extract token from Authorization header or query parameter
+			tokenString := ""
 			authHeader := c.Request().Header.Get("Authorization")
-			if authHeader == "" {
-				return echo.NewHTTPError(http.StatusUnauthorized, "missing authorization header")
+			if authHeader != "" {
+				parts := strings.Split(authHeader, " ")
+				if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+					tokenString = parts[1]
+				}
+			} else {
+				// If header is not found, check query parameter for WebSocket
+				tokenString = c.QueryParam("token")
 			}
 
-			// Check if the header has the correct format "Bearer <token>"
-			parts := strings.Split(authHeader, " ")
-			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-				return echo.NewHTTPError(http.StatusUnauthorized, "invalid authorization header format")
+			if tokenString == "" {
+				return echo.NewHTTPError(http.StatusUnauthorized, "missing or invalid token")
 			}
 
 			// Parse and validate token
-			token, err := jwt.ParseWithClaims(parts[1], &Claims{}, func(token *jwt.Token) (interface{}, error) {
+			token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 				// Validate the signing algorithm
 				if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 					return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])

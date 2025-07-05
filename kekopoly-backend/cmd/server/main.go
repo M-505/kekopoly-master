@@ -62,10 +62,7 @@ func main() {
 	sugar.Info("Connected to Redis")
 
 	// Initialize Redis queue
-	redisQueue, err := queue.NewRedisQueue(cfg.Redis.URI, logger)
-	if err != nil {
-		sugar.Fatalf("Failed to initialize Redis queue: %v", err)
-	}
+	redisQueue := queue.NewRedisQueue(redisClient, logger)
 	defer redisQueue.Close()
 	sugar.Info("Initialized Redis queue")
 

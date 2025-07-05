@@ -73,21 +73,10 @@ func NewServerWithClients(cfg *config.Config, gameManager *manager.GameManager, 
 
 	// Initialize Redis queue if Redis is enabled and client is available
 	var redisQueue *queue.RedisQueue
-	var err error
 	if redisClient != nil {
-		// Get Redis URI from config
-		redisURI := cfg.Redis.URI
-		if redisURI == "" {
-			logger.Warn("Redis URI not set in config")
-		} else {
-			// Create Redis queue
-			redisQueue, err = queue.NewRedisQueue(redisURI, logger.Desugar())
-			if err != nil {
-				logger.Warnf("Failed to initialize Redis queue: %v", err)
-			} else {
-				logger.Info("Redis queue initialized")
-			}
-		}
+		// Use the existing client to create the queue
+		redisQueue = queue.NewRedisQueue(redisClient, logger.Desugar())
+		logger.Info("Redis queue initialized using existing client")
 	} else {
 		logger.Info("Redis disabled, running in single-instance mode")
 	}

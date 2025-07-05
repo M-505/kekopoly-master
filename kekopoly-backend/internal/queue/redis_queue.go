@@ -38,8 +38,19 @@ type RedisQueue struct {
 	ctx    context.Context
 }
 
-// NewRedisQueue creates a new Redis queue
-func NewRedisQueue(configURI string, logger *zap.Logger) (*RedisQueue, error) {
+// NewRedisQueue creates a new Redis queue using an existing redis client.
+// The lifecycle of the client is managed by the caller.
+func NewRedisQueue(client *redis.Client, logger *zap.Logger) *RedisQueue {
+	return &RedisQueue{
+		client: client,
+		logger: logger,
+		ctx:    context.Background(),
+	}
+}
+
+// NewRedisQueueFromURI is a helper function to create a RedisQueue by creating a new client from a URI.
+// This is useful for testing or scenarios where a dedicated client is needed.
+func NewRedisQueueFromURI(configURI string, logger *zap.Logger) (*RedisQueue, error) {
 	// First try environment variable, then fallback to config
 	uri := os.Getenv("REDIS_URI")
 	if uri == "" {
@@ -69,6 +80,7 @@ func NewRedisQueue(configURI string, logger *zap.Logger) (*RedisQueue, error) {
 	// Test connection
 	_, err = client.Ping(ctx).Result()
 	if err != nil {
+		client.Close() // Close the client if the connection fails
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
 
@@ -79,9 +91,12 @@ func NewRedisQueue(configURI string, logger *zap.Logger) (*RedisQueue, error) {
 	}, nil
 }
 
-// Close closes the Redis connection
+// Close is a no-op because the Redis client's lifecycle is managed externally.
+// The creator of the client is responsible for closing it.
 func (q *RedisQueue) Close() error {
-	return q.client.Close()
+	// To prevent closing a shared client, this method does nothing.
+	// The client should be closed by its creator in main.go.
+	return nil
 }
 
 // EnqueuePlayerTokenUpdate adds a player token update message to the queue
