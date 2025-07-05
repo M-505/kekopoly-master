@@ -267,26 +267,28 @@ const GameRoom = () => {
   // Broadcast current player information to other clients with debouncing
   const broadcastPlayerInfo = useCallback((initialPlayerData = null) => {
 
-    // --- Exit early if initialPlayerData is not provided ---
-    // We only want to send the detailed join message *once* during registration.
-    // Subsequent syncs should use different mechanisms or rely on server state.
-    if (!initialPlayerData) {
-      // console.log('[PLAYER_DISPLAY] Skipping broadcast: No initialPlayerData provided. Initial join message should have already been sent.');
-      return;
-    }
-    // ---
-
     if (!currentPlayerId || !socketService || !socketService.socket ||
         socketService.socket.readyState !== WebSocket.OPEN) {
       // console.log('[PLAYER_DISPLAY] Cannot broadcast player info: Socket not ready or missing info', { currentPlayerId, socketReady: socketService?.socket?.readyState });
       return;
     }
 
-    // --- Use initialPlayerData (checked for existence above) ---
+    // --- Use initialPlayerData if provided, otherwise get from Redux store ---
     let dataToSend = initialPlayerData;
-    // console.log('[PLAYER_DISPLAY] Broadcasting player info using initial data:', dataToSend);
+    if (!dataToSend) {
+      // Get player data from Redux store
+      const currentState = store.getState();
+      const playersInStore = currentState.players.players || {};
+      dataToSend = playersInStore[currentPlayerId];
+      
+      if (!dataToSend) {
+        // console.log('[PLAYER_DISPLAY] No player data available in store or as parameter');
+        return;
+      }
+    }
+    // console.log('[PLAYER_DISPLAY] Broadcasting player info using data:', dataToSend);
 
-    // Debounce check
+    // Debounce checkhttps://kekopoly-master.onrender.com/room/Q4WZB2
     if (!window.lastBroadcastTime) { window.lastBroadcastTime = 0; }
     const now = Date.now(); // Declare 'now' ONCE here
     if (now - window.lastBroadcastTime < 2000) {
@@ -330,7 +332,7 @@ const GameRoom = () => {
       }
     });
 
-    // console.log('[PLAYER_DISPLAY] Player info broadcast complete (using initial data)');
+    // console.log('[PLAYER_DISPLAY] Player info broadcast complete');
   }, [currentPlayerId, socketService]); // Dependency array remains minimal
 
   // Setup navigation function in window object for socketService to use
@@ -694,7 +696,23 @@ const GameRoom = () => {
             if (updatedPlayersInStore[currentPlayerId]) {
               broadcastPlayerInfo();
             } else {
-              // console.log("Player still not in state after delay, skipping broadcast");
+              // console.log("Player still not in state after delay, creating minimal broadcast");
+              // Create minimal player data for broadcast if still not in state
+              const playerName = localStorage.getItem(`kekopoly_player_name_${roomId}`) || 'Player';
+              const playerToken = localStorage.getItem(`kekopoly_player_token_${roomId}`) || 'pepe';
+              const tokenData = PLAYER_TOKENS.find(t => t.id === playerToken);
+              
+              const minimalPlayerData = {
+                id: currentPlayerId,
+                name: playerName,
+                token: playerToken,
+                emoji: tokenData ? tokenData.emoji : '👤',
+                color: tokenData ? tokenData.color : 'gray.500',
+                isReady: false,
+                status: 'ACTIVE'
+              };
+              
+              broadcastPlayerInfo(minimalPlayerData);
             }
           }, 1500);
         }
@@ -708,18 +726,14 @@ const GameRoom = () => {
         socketService && socketService.socket &&
         socketService.socket.readyState === WebSocket.OPEN) {
 
-      // console.log('Connection established and player registered. Initial broadcast should have happened in handleRegisterPlayer.');
-      // --- REMOVED BROADCAST CALL HERE ---
-      // The necessary broadcast with correct data happens in handleRegisterPlayer.
-      // Calling it here again without initial data sends defaults.
-      // broadcastPlayerInfo();
-      // ---
+      // console.log('Connection established and player registered. Broadcasting current player info.');
+      // Broadcast current player info to ensure all players can see each other
+      broadcastPlayerInfo();
 
       // Don't determine host status locally - server is the source of truth
       // console.log('Relying on server for player state synchronization.');
     }
-  // NOTE: Removed broadcastPlayerInfo from dependencies as it's no longer called here
-  }, [isRegistered, currentPlayerId, players.length, socketService?.socket?.readyState]);
+  }, [isRegistered, currentPlayerId, players.length, socketService?.socket?.readyState, broadcastPlayerInfo]);
 
   // Effect to set up a consolidated player sync heartbeat
   useEffect(() => {

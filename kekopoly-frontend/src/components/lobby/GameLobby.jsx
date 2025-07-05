@@ -612,9 +612,14 @@ const GameLobby = () => {
                 {truncateAddress(user?.walletAddress)}
               </MenuButton>
               <MenuList>
-                {/* <MenuItem onClick={handleDisconnectWallet}>
-                  Disconnect Wallet
-                </MenuItem> */}
+                <MenuItem onClick={() => {
+                  // Dispatch logout action
+                  dispatch({ type: 'auth/logout' });
+                  // Navigate to login page
+                  navigate('/login');
+                }}>
+                  Log Out
+                </MenuItem>
               </MenuList>
             </Menu>
           </Flex>
