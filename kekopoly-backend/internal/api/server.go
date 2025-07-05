@@ -143,7 +143,28 @@ func NewServerWithClients(cfg *config.Config, gameManager *manager.GameManager, 
 func (s *Server) configureMiddleware() {
 	s.echo.Use(middleware.Logger())
 	s.echo.Use(middleware.Recover())
-	s.echo.Use(middleware.CORS())
+	// Configure CORS with WebSocket support
+	s.echo.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{echo.GET, echo.PUT, echo.POST, echo.DELETE, echo.OPTIONS},
+		AllowHeaders: []string{
+			echo.HeaderOrigin,
+			echo.HeaderContentType,
+			echo.HeaderAccept,
+			echo.HeaderAuthorization,
+			echo.HeaderXRequestID,
+			"Upgrade",
+			"Connection",
+			"Sec-WebSocket-Key",
+			"Sec-WebSocket-Version",
+		},
+		AllowCredentials: true,
+		ExposeHeaders: []string{
+			"Upgrade",
+			"Connection",
+			"Sec-WebSocket-Accept",
+		},
+	}))
 	s.echo.Use(middleware.RequestID())
 
 	// Add metrics middleware
@@ -294,8 +315,35 @@ func (s *Server) configureRoutes() {
 	actionGroup.POST("/special/:actionId", gameHandler.SpecialAction)
 
 	// WebSocket routes (JWT required)
-	s.echo.GET("/ws/:gameId", wsHandler.HandleConnection)
-	s.echo.GET("/ws/lobby", wsHandler.HandleLobbyConnection) // New endpoint for lobby connections
+	wsGroup := s.echo.Group("/ws")
+	wsGroup.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"*"},
+		AllowHeaders: []string{
+			echo.HeaderOrigin,
+			echo.HeaderContentType,
+			echo.HeaderAccept,
+			echo.HeaderAuthorization,
+			"Upgrade",
+			"Connection",
+			"Sec-WebSocket-Key",
+			"Sec-WebSocket-Version",
+			"Sec-WebSocket-Extensions",
+			"Sec-WebSocket-Protocol",
+		},
+		AllowMethods:     []string{"GET", "OPTIONS"},
+		AllowCredentials: true,
+		ExposeHeaders: []string{
+			"Upgrade",
+			"Connection",
+			"Sec-WebSocket-Accept",
+			"Sec-WebSocket-Protocol",
+		},
+	}))
+
+	// Apply JWT middleware to WebSocket routes
+	wsGroup.Use(jwtMiddleware)
+	wsGroup.GET("/:gameId", wsHandler.HandleConnection)
+	wsGroup.GET("/lobby", wsHandler.HandleLobbyConnection)
 
 	// Health check endpoints (no auth required)
 	s.echo.GET("/health", healthHandler.Check)

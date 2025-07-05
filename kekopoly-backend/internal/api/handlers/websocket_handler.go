@@ -113,56 +113,13 @@ func (h *WebSocketHandler) HandleConnection(c echo.Context) error {
 		return h.HandleLobbyConnection(c)
 	}
 
-	// --- Token Validation ---
-	var userID string
-	devSkip := strings.ToLower(strings.TrimSpace(strings.Trim(os.Getenv("DEV_SKIP_JWT"), "\"'")))
-	if devSkip == "1" || devSkip == "true" {
-		tokenString := c.QueryParam("token")
-		if tokenString == "" {
-			h.logger.Warn("WebSocket connection rejected: Missing token in query parameter (dev mode)")
-			return echo.NewHTTPError(http.StatusUnauthorized, "Unauthorized: Missing token (dev mode)")
-		}
-		// Try to extract userId from the JWT payload (base64 decode)
-		parts := strings.Split(tokenString, ".")
-		if len(parts) == 3 {
-			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-			if err == nil {
-				var payloadMap map[string]interface{}
-				if err := json.Unmarshal(payload, &payloadMap); err == nil {
-					if uid, ok := payloadMap["userId"].(string); ok && uid != "" {
-						userID = uid
-					} else {
-						userID = "dev-user"
-					}
-				} else {
-					userID = "dev-user"
-				}
-			} else {
-				userID = "dev-user"
-			}
-		} else {
-			userID = "dev-user"
-		}
-		h.logger.Infof("[DEV MODE] WebSocket accepted any token, userID: %s", userID)
-	} else if id, ok := c.Get("userID").(string); ok && id != "" {
-		userID = id
-		h.logger.Infof("UserID found in context: %s (JWT middleware likely ran)", userID)
-	} else {
-		// Fallback: Manually validate token from query parameter
-		tokenString := c.QueryParam("token")
-		if tokenString == "" {
-			h.logger.Warn("WebSocket connection rejected: Missing token in query parameter and no UserID in context")
-			return echo.NewHTTPError(http.StatusUnauthorized, "Unauthorized: Missing token")
-		}
-
-		claims, err := h.validateToken(tokenString)
-		if err != nil {
-			h.logger.Warnf("WebSocket connection rejected: Token validation failed: %v", err)
-			return echo.NewHTTPError(http.StatusUnauthorized, fmt.Sprintf("Unauthorized: Invalid token (%v)", err))
-		}
-		userID = claims.UserID
-		h.logger.Infof("UserID obtained from manually validated token: %s", userID)
+	// Get userID from context (set by JWT middleware)
+	userID, ok := c.Get("userID").(string)
+	if !ok || userID == "" {
+		h.logger.Warn("WebSocket connection rejected: No valid user ID in context")
+		return echo.NewHTTPError(http.StatusUnauthorized, "Unauthorized: Missing or invalid user ID")
 	}
+	h.logger.Infof("UserID from JWT middleware: %s", userID)
 	// --- End Token Validation ---
 
 	// Get session ID from query parameter
