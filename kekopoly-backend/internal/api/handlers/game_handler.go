@@ -72,11 +72,21 @@ func (h *GameHandler) CreateGame(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to create game")
 	}
 
+	// Get the newly created game to return complete information
+	game, err := h.gameManager.GetGame(gameID)
+	if err != nil {
+		h.logger.Errorf("Failed to get newly created game: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to get game details")
+	}
+
 	// Broadcast new game to all connected clients
 	go h.broadcastNewGame(gameID)
 
-	return c.JSON(http.StatusCreated, map[string]string{
+	return c.JSON(http.StatusCreated, map[string]interface{}{
 		"gameId": gameID,
+		"code":   game.Code,
+		"name":   game.Name,
+		"status": string(game.Status),
 	})
 }
 

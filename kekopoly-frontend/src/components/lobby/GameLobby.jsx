@@ -306,18 +306,25 @@ const GameLobby = () => {
       });
 
       // Log response for debugging
-      // console.log('Create game response:', data);
+      console.log('Create game response:', data);
+      
+      // Extract game info from response
       const gameId = data.gameId;
+      const roomCode = data.code;
 
-      // Set room code in Redux
-      dispatch(setRoomCode(gameId));
+      if (!gameId) {
+        throw new Error('No game ID returned from server');
+      }
 
-      // Show success message
+      // Set room code in Redux (use the actual room code, not the game ID)
+      dispatch(setRoomCode(roomCode || gameId));
+
+      // Show success message with room code
       toast({
         title: 'Game created',
-        description: `Your game "${newGameName}" has been created!`,
+        description: `Your game "${newGameName}" has been created! Room code: ${roomCode || gameId}`,
         status: 'success',
-        duration: 3000,
+        duration: 5000,
         isClosable: true,
       });
 
