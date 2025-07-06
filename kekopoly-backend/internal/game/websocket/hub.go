@@ -1529,21 +1529,10 @@ func (c *Client) handleMessage(message []byte) {
 			}
 			// ---
 
-			// --- Broadcast the updated player info to ALL clients (including sender) ---
-			// Reuse the player_joined message type for simplicity on the frontend
-			joinedMsg := map[string]interface{}{
-				"type":   "player_joined",
-				"player": playerInfo, // Send the full info we just stored
-			}
-			joinedBytes, joinedErr := json.Marshal(joinedMsg)
-			if joinedErr == nil {
-				// Broadcast to everyone in the game
-				c.hub.BroadcastToGame(c.gameID, joinedBytes)
-				// c.hub.logger.Infof("Broadcasted player_joined for %s to game %s", c.playerID, c.gameID)
-			} else {
-				c.hub.logger.Warnf("Failed to marshal player_joined broadcast message: %v", joinedErr)
-			}
-			// ---
+			// --- CRITICAL FIX: Broadcast the ENTIRE updated player list to ALL clients ---
+			// This ensures all clients are in sync.
+			c.hub.logger.Infof("Player %s joined, broadcasting updated player list for game %s", c.playerID, c.gameID)
+			c.handleGetActivePlayers() // This will get the full list and broadcast it
 
 		}
 		break

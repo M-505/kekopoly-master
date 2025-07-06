@@ -211,6 +211,7 @@ const GameRoom = () => {
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [isReadyLoading, setIsReadyLoading] = useState(false);
+  const [isInitialized, setIsInitialized] = useState(false);
 
 
 
@@ -417,6 +418,14 @@ const GameRoom = () => {
 
     console.log('[PLAYER_DISPLAY] Player info broadcast complete');
   }, [currentPlayerId, socketService, roomId]); // Added roomId to dependency array
+
+  // When a player is registered, broadcast their info
+  useEffect(() => {
+    if (isRegistered && socketService.isConnected() && isInitialized) {
+      console.log(`[BROADCAST_TRIGGER] isRegistered and initialized for player ${currentPlayerId}, broadcasting info.`);
+      broadcastPlayerInfo();
+    }
+  }, [isRegistered, broadcastPlayerInfo, isInitialized]);
 
   // Setup navigation function in window object for socketService to use
   useEffect(() => {
@@ -1931,7 +1940,7 @@ const GameRoom = () => {
                 Copy
               </Button>
             </HStack>
-          </HStack>
+                   </HStack>
 
           {/* Add logging inside the render return */}
           {/* {console.log(`[Render] Rendering GameRoom. isRegistered=${isRegistered}, isHost=${isHost}`)} */}

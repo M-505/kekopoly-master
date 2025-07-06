@@ -157,7 +157,7 @@ export class RegistrationManager {
   /**
    * Reset registration state (for cleanup or errors)
    */
-  reset() {
+  resetRegistrationState() {
     this.isRegistering = false;
     this.registrationAttempts = 0;
     if (this.registrationTimeout) {

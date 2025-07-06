@@ -8,7 +8,6 @@
 import { log, logError, logWarning } from '../../utils/logger';
 import { store } from '../../store/store';
 import {
-  setPlayers,
   setHost
 } from '../../store/gameSlice';
 import {
@@ -21,7 +20,8 @@ import {
   addPlayerProperty,
   removePlayerProperty,
   removePlayer,
-  setPlayerReady
+  setPlayerReady,
+  setPlayers
 } from '../../store/playerSlice';
 
 /**
@@ -34,44 +34,17 @@ export function handleActivePlayers(data) {
   log('ACTIVE_PLAYERS', `Received ${data.players?.length || 0} active players`);
 
   if (Array.isArray(data.players)) {
-    // Check if any player has isHost flag set
-    const hostPlayer = data.players.find(p => p.isHost);
-
-    // Check if hostId is included in the message
-    if (data.hostId) {
-      dispatch(setHost(data.hostId));
-    }
-
-    // Update players in both stores
+    // The backend now sends the full list. Replace the local list.
     dispatch(setPlayers(data.players));
 
-    // Add each player to the playerSlice
-    data.players.forEach(player => {
-      if (player && player.id) {
-        dispatch(addPlayer({
-          playerId: player.id,
-          playerData: player
-        }));
-      }
-    });
-
-    // If we have a hostId but no player has isHost flag, update player flags
+    // The host can be derived from the player list, but if hostId is sent, use it.
     if (data.hostId) {
-      const state = store.getState();
-      const players = state.players.players;
-
-      // Update each player's isHost flag based on the hostId
-      Object.entries(players).forEach(([playerId, player]) => {
-        const isHost = playerId === data.hostId;
-
-        // Only dispatch if the isHost flag needs to change
-        if (player.isHost !== isHost) {
-          dispatch(updatePlayer({
-            ...player,
-            isHost
-          }));
-        }
-      });
+      dispatch(setHost(data.hostId));
+    } else {
+      const hostPlayer = data.players.find(p => p.isHost);
+      if (hostPlayer) {
+        dispatch(setHost(hostPlayer.id));
+      }
     }
   }
 }

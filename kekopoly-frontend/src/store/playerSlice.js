@@ -20,6 +20,19 @@ const playerSlice = createSlice({
     setLocalPlayerId: (state, action) => {
       state.localPlayerId = action.payload;
     },
+    setPlayers: (state, action) => {
+      const players = action.payload;
+      if (Array.isArray(players)) {
+        state.players = players.reduce((acc, player) => {
+          if (player && player.id) {
+            acc[player.id] = player;
+          }
+          return acc;
+        }, {});
+      } else {
+        console.error("setPlayers payload must be an array of player objects");
+      }
+    },
     addPlayer: (state, action) => {
       const { playerId, playerData } = action.payload;
       state.players[playerId] = playerData;
@@ -140,6 +153,7 @@ export const {
   setSelectedToken,
   setSelectedColor,
   setLocalPlayerId,
+  setPlayers,
   addPlayer,
   updatePlayer,
   updatePlayerPosition,
