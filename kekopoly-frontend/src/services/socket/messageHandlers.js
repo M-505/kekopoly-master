@@ -253,6 +253,18 @@ export function handleMessage(event) {
       case 'player_joined_ack':
         // Log acknowledgment from server
         log('ACK', 'Server acknowledged player joined:', data.player?.id);
+        
+        // Mark player as successfully registered in backend to prevent registration loops
+        if (this.markPlayerAsRegistered) {
+          this.markPlayerAsRegistered();
+        }
+        
+        // Now we can safely process any queued token updates
+        if (this.sendQueuedMessages) {
+          setTimeout(() => {
+            this.sendQueuedMessages();
+          }, 100);
+        }
         break;
 
       case 'game_state':

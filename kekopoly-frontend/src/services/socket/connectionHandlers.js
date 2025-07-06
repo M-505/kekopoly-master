@@ -36,6 +36,12 @@ export function connect(gameId, playerId, token, initialPlayerData) {
   this.gameId = normalizedRoomId;
   this.playerId = playerId;
 
+  // Reset registration state for new connection to prevent loops
+  this.saveState('playerJoinedSent', false);
+  this.saveState('tokenUpdateSent', false);
+  this.saveState('initialPlayerDataSent', false);
+  log('CONNECT', 'Reset registration state for new connection');
+
   // Always get the latest token from the Redux store or localStorage
   const state = store.getState();
   const freshToken = state.auth.token || localStorage.getItem('kekopoly_token');
@@ -264,7 +270,7 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         }
 
         // Send initial player data if available (used for the first connection)
-        if (initialPlayerData) {
+        if (initialPlayerData && !this.loadState('playerJoinedSent', false)) {
           log('CONNECT', 'Sending initial player data on connection:', initialPlayerData);
 
           // CRITICAL: Send player_joined message FIRST to establish player in backend
@@ -272,23 +278,27 @@ export function connect(gameId, playerId, token, initialPlayerData) {
             player: initialPlayerData // Use correct format that backend expects
           });
 
-          // Wait briefly to ensure player_joined is processed before sending updates
-          setTimeout(() => {
-            if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
-              // Now send token update if player has a token
-              if (initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji) {
-                this.sendMessage('update_player_info', {
-                  playerId: this.playerId,
-                  token: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
-                  characterToken: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
-                  emoji: initialPlayerData.emoji || initialPlayerData.token || '👤'
-                });
-                log('CONNECT', 'Sent token update after player join confirmation');
-              }
-            }
-          }, 250); // Small delay to ensure proper order
+          // Mark that we've sent the player_joined message to prevent loops
+          this.saveState('playerJoinedSent', true);
+          this.saveState('lastSentPlayerData', initialPlayerData);
 
-        } else if (this.initialPlayerDataToSend) {
+          // Only send token update if player has a token and we haven't sent it yet
+          if ((initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji) && 
+              !this.loadState('tokenUpdateSent', false)) {
+            
+            // Use message queue to ensure proper sequencing
+            this.queueMessage('update_player_info', {
+              playerId: this.playerId,
+              token: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
+              characterToken: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
+              emoji: initialPlayerData.emoji || initialPlayerData.token || '👤'
+            }, 'low', 500); // Low priority, 500ms delay to ensure player_joined is processed first
+
+            this.saveState('tokenUpdateSent', true);
+            log('CONNECT', 'Queued token update after player join');
+          }
+
+        } else if (this.initialPlayerDataToSend && !this.loadState('playerJoinedSent', false)) {
           log('CONNECT', 'Sending stored player data on connection:', this.initialPlayerDataToSend);
 
           // CRITICAL: Send player_joined message FIRST to establish player in backend
@@ -296,28 +306,30 @@ export function connect(gameId, playerId, token, initialPlayerData) {
             player: this.initialPlayerDataToSend // Use correct format that backend expects
           });
 
-          // Wait briefly to ensure player_joined is processed before sending updates
-          setTimeout(() => {
-            if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
-              // Now send token update if player has a token
-              if (this.initialPlayerDataToSend.token || this.initialPlayerDataToSend.characterToken || this.initialPlayerDataToSend.emoji) {
-                this.sendMessage('update_player_info', {
-                  playerId: this.playerId,
-                  token: this.initialPlayerDataToSend.token || this.initialPlayerDataToSend.characterToken || this.initialPlayerDataToSend.emoji,
-                  characterToken: this.initialPlayerDataToSend.token || this.initialPlayerDataToSend.characterToken || this.initialPlayerDataToSend.emoji,
-                  emoji: this.initialPlayerDataToSend.emoji || this.initialPlayerDataToSend.token || '👤'
-                });
-                log('CONNECT', 'Sent token update after stored player join confirmation');
-              }
-            }
-          }, 250); // Small delay to ensure proper order
-
-          // Store in connection state before clearing
+          // Mark that we've sent the player_joined message to prevent loops
+          this.saveState('playerJoinedSent', true);
           this.saveState('lastSentPlayerData', this.initialPlayerDataToSend);
 
-          // Don't clear initialPlayerDataToSend to allow for reconnection during navigation
-          // Instead, mark it as sent so we don't send duplicate data
+          // Only send token update if player has a token and we haven't sent it yet
+          if ((this.initialPlayerDataToSend.token || this.initialPlayerDataToSend.characterToken || this.initialPlayerDataToSend.emoji) && 
+              !this.loadState('tokenUpdateSent', false)) {
+            
+            // Use message queue to ensure proper sequencing
+            this.queueMessage('update_player_info', {
+              playerId: this.playerId,
+              token: this.initialPlayerDataToSend.token || this.initialPlayerDataToSend.characterToken || this.initialPlayerDataToSend.emoji,
+              characterToken: this.initialPlayerDataToSend.token || this.initialPlayerDataToSend.characterToken || this.initialPlayerDataToSend.emoji,
+              emoji: this.initialPlayerDataToSend.emoji || this.initialPlayerDataToSend.token || '👤'
+            }, 'low', 500); // Low priority, 500ms delay to ensure player_joined is processed first
+
+            this.saveState('tokenUpdateSent', true);
+            log('CONNECT', 'Queued token update after stored player join');
+          }
+
+          // Mark as sent so we don't send duplicate data
           this.saveState('initialPlayerDataSent', true);
+        } else if (this.loadState('playerJoinedSent', false)) {
+          log('CONNECT', 'Player join already sent, skipping duplicate player_joined message');
         }
 
         // Reset reconnect attempts on successful connection
@@ -347,34 +359,34 @@ export function connect(gameId, playerId, token, initialPlayerData) {
           }
         }, 100);
 
-        // Request initial game state after socket is ready
+        // Request initial game state after socket is ready and player is potentially registered
         setTimeout(() => {
           if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
             log('CONNECT', 'Requesting active players after connection');
             this.sendMessage('get_active_players');
 
-            // Request game state after active players
+            // Only request full game state after we've had time for player registration
             setTimeout(() => {
               if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
                 log('CONNECT', 'Requesting full game state after connection');
                 this.sendMessage('get_game_state', { full: true });
 
-                // Request current turn information
+                // Request current turn information after game state
                 setTimeout(() => {
                   if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
                     log('CONNECT', 'Requesting current turn information');
                     this.sendMessage('get_current_turn', {});
 
-                    // Start periodic state synchronization
+                    // Start periodic state synchronization only after initial state is loaded
                     if (this.startPeriodicStateSync) {
                       this.startPeriodicStateSync();
                     }
                   }
-                }, 100);
+                }, 200);
               }
-            }, 100);
+            }, 300);
           }
-        }, 200); // Wait 200ms for auth to process
+        }, 1000); // Wait longer for player registration to complete
 
         resolve(); // Resolve the promise on successful connection
       };
@@ -622,6 +634,10 @@ export function handleDisconnect(event) {
             this.isNavigating = false;
             this.saveState('isNavigating', false);
 
+            // Reset registration state for clean reconnection
+            this.saveState('playerJoinedSent', false);
+            this.saveState('tokenUpdateSent', false);
+
             // Request game state and active players to ensure we're in sync
             setTimeout(() => {
               if (this.socket && this.socket.readyState === WebSocket.OPEN) {
@@ -629,13 +645,28 @@ export function handleDisconnect(event) {
                 this.sendMessage('get_game_state', { full: true });
                 this.sendMessage('get_active_players');
 
-                // Also send player data again to ensure server has latest state
-                if (savedPlayerData) {
+                // Only send player data again if we have it and player isn't already registered
+                if (savedPlayerData && !this.loadState('playerRegisteredInBackend', false)) {
                   log('NAVIGATION_DISCONNECT', 'Re-sending player data after reconnection');
-                  this.sendMessage('update_player', {
-                    playerId: playerId,
-                    ...savedPlayerData
+                  
+                  // Send player_joined first, then queue token update
+                  this.sendMessage('player_joined', {
+                    player: savedPlayerData
                   });
+                  
+                  this.saveState('playerJoinedSent', true);
+                  
+                  // Queue token update if needed
+                  if (savedPlayerData.token || savedPlayerData.characterToken || savedPlayerData.emoji) {
+                    this.queueMessage('update_player_info', {
+                      playerId: playerId,
+                      token: savedPlayerData.token || savedPlayerData.characterToken || savedPlayerData.emoji,
+                      characterToken: savedPlayerData.token || savedPlayerData.characterToken || savedPlayerData.emoji,
+                      emoji: savedPlayerData.emoji || savedPlayerData.token || '👤'
+                    }, 'low', 500);
+                    
+                    this.saveState('tokenUpdateSent', true);
+                  }
                 }
               }
             }, 200);
@@ -807,4 +838,25 @@ export function isConnected() {
  */
 export function generateSessionId() {
   return Math.random().toString(36).substring(2, 15);
+}
+
+/**
+ * Mark player as successfully registered in the backend
+ * This prevents duplicate player_joined messages and registration loops
+ */
+export function markPlayerAsRegistered() {
+  this.saveState('playerRegisteredInBackend', true);
+  log('CONNECT', 'Player marked as successfully registered in backend');
+}
+
+/**
+ * Reset player registration state
+ * Call this when starting a new game or connection
+ */
+export function resetPlayerRegistrationState() {
+  this.saveState('playerJoinedSent', false);
+  this.saveState('tokenUpdateSent', false);
+  this.saveState('initialPlayerDataSent', false);
+  this.saveState('playerRegisteredInBackend', false);
+  log('CONNECT', 'Player registration state reset');
 }
