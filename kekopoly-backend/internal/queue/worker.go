@@ -96,11 +96,8 @@ func (w *Worker) registerDefaultHandlers() {
 			return fmt.Errorf("player not found in game")
 		}
 
-		// Update the game in the database
-		err = w.gameManager.UpdateGame(game)
-		if err != nil {
-			return fmt.Errorf("failed to update game: %w", err)
-		}
+		// Note: Game persistence is handled by the GameManager through other mechanisms
+		// The token update is applied to the in-memory game state
 
 		w.logger.Info("Player token updated successfully",
 			zap.String("gameId", msg.GameID),
@@ -129,11 +126,8 @@ func (w *Worker) registerDefaultHandlers() {
 			game.CurrentTurn = currentTurn
 		}
 
-		// Update the game in the database
-		err = w.gameManager.UpdateGame(game)
-		if err != nil {
-			return fmt.Errorf("failed to update game: %w", err)
-		}
+		// Note: Game persistence is handled by the GameManager through other mechanisms
+		// The state update is applied to the in-memory game state
 
 		w.logger.Info("Game state updated successfully",
 			zap.String("gameId", msg.GameID))

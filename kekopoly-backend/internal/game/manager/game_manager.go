@@ -656,11 +656,11 @@ func (gm *GameManager) StartGame(gameID string, requestingPlayerID string) error
 		bson.M{"_id": objID},
 		bson.M{
 			"$set": bson.M{
-				"status":      session.Game.Status,
-				"currentTurn": session.Game.CurrentTurn,
-				"turnOrder":   session.Game.TurnOrder,
-				"players":     session.Game.Players,
-				"updatedAt":   session.Game.UpdatedAt,
+				"status":       session.Game.Status,
+				"currentTurn":  session.Game.CurrentTurn,
+				"turnOrder":    session.Game.TurnOrder,
+				"players":      session.Game.Players,
+				"updatedAt":    session.Game.UpdatedAt,
 				"lastActivity": session.Game.LastActivity,
 			},
 		},
@@ -863,7 +863,7 @@ func (gm *GameManager) PlayerDisconnected(gameID, sessionID string) { // Reverte
 	if session.Game.Status == models.GameStatusAbandoned {
 		updateFields["status"] = session.Game.Status
 		gm.logger.Debugf("[PlayerDisconnected] Preparing to update status to '%s' in DB for game %s", session.Game.Status, gameID)
-		
+
 		// Schedule cleanup of the abandoned game after a brief delay
 		go func() {
 			time.Sleep(2 * time.Second) // Give time for final messages to be sent
@@ -2017,7 +2017,7 @@ func (gm *GameManager) CleanupAbandonedGame(gameID string, deleteFromDB bool) er
 		}
 		msgBytes, _ := json.Marshal(deleteMsg)
 		gm.wsHub.BroadcastToGame(gameID, msgBytes)
-		
+
 		// Give a brief moment for the message to be sent before cleanup
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -2076,4 +2076,35 @@ func (gm *GameManager) broadcastLobbyUpdate() {
 	if gm.wsHub != nil {
 		gm.wsHub.BroadcastToLobby(msgBytes)
 	}
+}
+
+// UpdateGame updates an existing game in both memory and database
+func (gm *GameManager) UpdateGame(game *models.Game) error {
+	if game == nil {
+		return errors.New("game cannot be nil")
+	}
+
+	gm.mutex.Lock()
+	defer gm.mutex.Unlock()
+
+	// Update in-memory game
+	gm.games[game.ID.Hex()] = game
+
+	// Update in database
+	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
+	filter := bson.M{"_id": game.ID}
+
+	_, err := collection.UpdateOne(
+		gm.ctx,
+		filter,
+		bson.M{"$set": game},
+	)
+
+	if err != nil {
+		gm.logger.Errorf("Failed to update game in database: %v", err)
+		return fmt.Errorf("failed to update game in database: %w", err)
+	}
+
+	gm.logger.Debugf("Successfully updated game %s in memory and database", game.ID.Hex())
+	return nil
 }

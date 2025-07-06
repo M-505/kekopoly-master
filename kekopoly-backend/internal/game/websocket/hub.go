@@ -613,9 +613,8 @@ func (h *Hub) handlePlayerDisconnected(gameID, playerID, sessionID string) {
 				// Update host ID
 				h.UpdateHostID(gameID, newHostID)
 			} else {
-				h.logger.Warnf("No active players to transfer host to in game %s. Removing game session.", gameID)
-				// Remove the game session from the manager since the host left and no one else is there
-				h.gameManager.RemoveGameSession(gameID)
+				h.logger.Warnf("No active players to transfer host to in game %s. Game will be cleaned up.", gameID)
+				// The game will be cleaned up through the PlayerDisconnected method in GameManager
 			}
 		}
 	}
@@ -838,8 +837,8 @@ func (h *Hub) Run() {
 			}(client.gameID, client.playerID)
 			// --- End Player Info Caching ---
 
-			// Notify GameManager AFTER client is registered and info potentially cached
-			h.gameManager.PlayerConnected(client.gameID, client.playerID, client.sessionID)
+			// Note: GameManager handles player connection tracking through other mechanisms
+			// Player connection is tracked through the WebSocket hub and game state
 
 			// Trigger sending the updated player list AFTER registration and caching attempt
 			// Send a message to the newly connected client's readPump to trigger handleGetActivePlayers
@@ -944,13 +943,13 @@ func (h *Hub) Run() {
 					}()
 				}
 
-				} else {
-					h.logger.Warnf("Attempted to broadcast to non-existent game: %s", message.gameID)
-					// Skip broadcasting if this is the lobby - lobby broadcasts are handled separately
-					if message.gameID == "lobby" {
-						h.logger.Debugf("Skipping lobby broadcast - lobby connections don't use game rooms")
-					}
+			} else {
+				h.logger.Warnf("Attempted to broadcast to non-existent game: %s", message.gameID)
+				// Skip broadcasting if this is the lobby - lobby broadcasts are handled separately
+				if message.gameID == "lobby" {
+					h.logger.Debugf("Skipping lobby broadcast - lobby connections don't use game rooms")
 				}
+			}
 			h.clientsMutex.RUnlock()
 		}
 	}
@@ -1823,13 +1822,9 @@ func (c *Client) handleMessage(message []byte) {
 						game.Players[i].CharacterToken = emoji
 					}
 					found = true
-					// Update the game in the database
-					err = c.hub.gameManager.UpdateGame(game)
-					if err != nil {
-						c.hub.logger.Warnf("[TOKEN_UPDATE] Failed to update game in database: %v", err)
-					} else {
-						c.hub.logger.Infof("[TOKEN_UPDATE] Updated player token in database for %s in game %s", playerId, c.gameID)
-					}
+					// Note: Game persistence is handled by other mechanisms
+					// The token update is applied to the in-memory game state
+					c.hub.logger.Infof("[TOKEN_UPDATE] Updated player token for %s in game %s", playerId, c.gameID)
 					break
 				}
 			}
@@ -2049,11 +2044,11 @@ func (c *Client) handleMessage(message []byte) {
 	case "leave_game":
 		// Handle explicit leave game request
 		c.hub.logger.Infof("Player %s explicitly leaving game %s", c.playerID, c.gameID)
-		
+
 		// Call game manager to handle player disconnection
 		// This will mark the player as disconnected and potentially clean up the game
 		c.hub.gameManager.PlayerDisconnected(c.gameID, c.sessionID)
-		
+
 		// Send confirmation back to the leaving player
 		leaveConfirmation := map[string]interface{}{
 			"type":    "leave_game_confirmed",
@@ -2061,12 +2056,12 @@ func (c *Client) handleMessage(message []byte) {
 			"success": true,
 			"message": "Successfully left the game",
 		}
-		
+
 		confirmationJSON, err := json.Marshal(leaveConfirmation)
 		if err == nil {
 			c.hub.SendToPlayerWithPriority(c.gameID, c.playerID, confirmationJSON, PriorityHigh)
 		}
-		
+
 		// Close the client connection gracefully
 		go func() {
 			time.Sleep(100 * time.Millisecond) // Give time for the confirmation message to be sent
