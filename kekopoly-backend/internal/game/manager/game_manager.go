@@ -644,8 +644,28 @@ func (gm *GameManager) StartGame(gameID string, requestingPlayerID string) error
 	session.Game.UpdatedAt = time.Now()
 	session.Game.LastActivity = time.Now()
 
-	// Update game in database - use UpdateGame to ensure all fields are preserved
-	if updateErr := gm.UpdateGame(session.Game); updateErr != nil {
+	// Update game in database
+	objID, err := primitive.ObjectIDFromHex(gameID)
+	if err != nil {
+		return fmt.Errorf("invalid game ID format: %w", err)
+	}
+
+	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
+	_, updateErr := collection.UpdateOne(
+		gm.ctx,
+		bson.M{"_id": objID},
+		bson.M{
+			"$set": bson.M{
+				"status":      session.Game.Status,
+				"currentTurn": session.Game.CurrentTurn,
+				"turnOrder":   session.Game.TurnOrder,
+				"players":     session.Game.Players,
+				"updatedAt":   session.Game.UpdatedAt,
+				"lastActivity": session.Game.LastActivity,
+			},
+		},
+	)
+	if updateErr != nil {
 		return fmt.Errorf("failed to update game: %w", updateErr)
 	}
 
