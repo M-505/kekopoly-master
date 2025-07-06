@@ -47,6 +47,7 @@ import socketService from '../../services/socket';
 import { store } from '../../store/store';
 import { isTokenExpired } from '../../utils/tokenUtils';
 import sessionMonitor from '../../utils/sessionMonitor';
+import { safeNavigateToGame } from '../../utils/navigationUtils';
 
 // Available tokens for players to choose from
 const PLAYER_TOKENS = [
@@ -267,9 +268,12 @@ const GameRoom = () => {
   // Broadcast current player information to other clients with debouncing
   const broadcastPlayerInfo = useCallback((initialPlayerData = null) => {
 
-    if (!currentPlayerId || !socketService || !socketService.socket ||
-        socketService.socket.readyState !== WebSocket.OPEN) {
-      console.log('[PLAYER_DISPLAY] Cannot broadcast player info: Socket not ready or missing info', { currentPlayerId, socketReady: socketService?.socket?.readyState });
+    if (!currentPlayerId || !socketService || !socketService.isConnected()) {
+      console.log('[PLAYER_DISPLAY] Cannot broadcast player info: Socket not ready or missing info', { 
+        currentPlayerId, 
+        socketConnected: socketService?.socket?.readyState === WebSocket.OPEN,
+        socketReady: socketService?.socketReady 
+      });
       return;
     }
 
@@ -299,14 +303,15 @@ const GameRoom = () => {
     }
     console.log('[PLAYER_DISPLAY] Broadcasting player info using data:', dataToSend);
 
-    // Debounce check - reduce debounce time for better responsiveness
-    if (!window.lastBroadcastTime) { window.lastBroadcastTime = 0; }
+    // Improved debounce check - use per-player debouncing
+    const debounceKey = `lastBroadcast_${currentPlayerId}`;
+    if (!window[debounceKey]) { window[debounceKey] = 0; }
     const now = Date.now();
-    if (now - window.lastBroadcastTime < 1000) { // Reduced from 2000ms to 1000ms
+    if (now - window[debounceKey] < 2000) { // 2 second debounce per player
       console.log('[PLAYER_DISPLAY] Skipping broadcast due to debounce');
       return;
     }
-    window.lastBroadcastTime = now;
+    window[debounceKey] = now;
 
     // Always try to get emoji and color from token first for consistency
     let emoji = '👤';
@@ -348,7 +353,7 @@ const GameRoom = () => {
 
     // After broadcasting, also request the current active players to ensure sync
     setTimeout(() => {
-      if (socketService && socketService.socket && socketService.socket.readyState === WebSocket.OPEN) {
+      if (socketService && socketService.isConnected()) {
         console.log('[PLAYER_DISPLAY] Requesting active players after broadcast');
         socketService.sendMessage('get_active_players', {});
       }
@@ -369,8 +374,8 @@ const GameRoom = () => {
       const targetGameId = event.detail?.gameId || roomId;
       const fromHost = event.detail?.hostId !== currentPlayerId;
 
-      // Only proceed if we're not the host and this is a host-initiated start
-      if (!fromHost) return;
+      // All players (including host) should navigate when they receive game-started event
+      console.log('[GAME_STARTED] Received game-started event, navigating to game board');
 
       // Update Redux state
       dispatch(setGameStarted(true));
@@ -396,7 +401,7 @@ const GameRoom = () => {
 
       toast({
         title: "Game Starting",
-        description: "Host has started the game. Joining game board...",
+        description: "Game has been started. Joining game board...",
         status: "info",
         duration: 3000,
         isClosable: true,
@@ -1312,21 +1317,21 @@ const GameRoom = () => {
       }
 
       // Send start game messages to server
-      if (socketService?.socket?.readyState === WebSocket.OPEN) {
+      if (socketService?.isConnected()) {
         // Send a game:start message to server
         socketService.sendMessage('game:start', {
           gameId: roomId,
           hostId: currentPlayerId,
           timestamp: Date.now(),
-          forceNavigate: true
+          forceNavigate: false // All players wait for WebSocket message
         });
 
-        // Send broadcast_game_started to notify other players
+        // Send broadcast_game_started to notify all players (including host)
         socketService.sendMessage('broadcast_game_started', {
           gameId: roomId,
           hostId: currentPlayerId,
           timestamp: Date.now(),
-          forceNavigate: true
+          forceNavigate: false // All players will navigate when they receive this message
         });
       }
 
@@ -1335,19 +1340,16 @@ const GameRoom = () => {
       dispatch(setGamePhase('playing'));
       dispatch(syncGameStatus('ACTIVE'));
 
-      // Set timeout for navigation
-      const gameStartTimeout = setTimeout(() => {
-        if (window.location.pathname.includes('/room/')) {
-          safeNavigateToGame(navigate, roomId, dispatch, toast);
-        }
-      }, 3000);
-
-      // Store timeout ID
-      try {
-        localStorage.setItem('kekopoly_game_start_timeout_id', gameStartTimeout.toString());
-      } catch (e) {
-        console.warn("[START_GAME] Could not store timeout ID in localStorage:", e);
-      }
+      // Host will now wait for WebSocket message like all other players
+      console.log('[START_GAME] Host initiated game start, waiting for WebSocket confirmation');
+      
+      toast({
+        title: "Game Starting",
+        description: "Starting game for all players...",
+        status: "info",
+        duration: 3000,
+        isClosable: true,
+      });
     } catch (error) {
       console.error("Error starting game:", error);
       toast({
@@ -1518,118 +1520,22 @@ const GameRoom = () => {
     if (!window.location.pathname.includes('/game/')) {
       // console.log('[ENHANCED_POLLING] Setting up enhanced game state polling');
 
-      // Add a backup timeout for non-host players to force navigation if needed
-      // This ensures that if the host has started the game but the client hasn't detected it,
-      // we'll still navigate after a reasonable timeout
-      let nonHostNavigationTimeout = null;
+      // Set up polling to detect when game starts via WebSocket messages
+      // This is for ALL players (including host) to detect game start confirmation
+      let gameStatePollingInterval = null;
 
-      // Only set up the timeout for non-host players
-      if (!isHost && currentPlayerId) {
-        console.warn('Setting up aggressive backup navigation timeout for non-host player');
+      // Set up polling for all players since everyone waits for WebSocket confirmation
+      if (currentPlayerId) {
+        console.log('[GAME_POLLING] Setting up game state polling for all players');
 
-        // First timeout - check if game has started in Redux or localStorage
-        nonHostNavigationTimeout = setTimeout(() => {
-          // Check if we're still on the room page
-          if (window.location.pathname.includes('/room/')) {
-            // Get the current game state
-            const state = store.getState();
-            const gameState = state.game;
-
-            // Check if the game has started according to Redux OR localStorage
-            const gameStartedInRedux = gameState.gameStarted || gameState.gamePhase === 'playing';
-            const gameStartedInLocalStorage = localStorage.getItem('kekopoly_game_started') === 'true';
-
-            console.warn(`Backup timeout check: gameStartedInRedux=${gameStartedInRedux}, gameStartedInLocalStorage=${gameStartedInLocalStorage}`);
-
-            // Navigate if EITHER condition is true (more aggressive)
-            if (gameStartedInRedux || gameStartedInLocalStorage) {
-              console.warn('Game has been started but navigation didn\'t trigger, forcing navigation');
-
-              // Force navigation to game board
-              dispatch(setGameStarted(true));
-              dispatch(setGamePhase('playing'));
-              dispatch(syncGameStatus('PLAYING'));
-
-              // Set localStorage flag to ensure consistent behavior
-              try {
-                localStorage.setItem('kekopoly_game_started', 'true');
-                localStorage.setItem('kekopoly_game_id', roomId);
-                localStorage.setItem('kekopoly_navigation_timestamp', Date.now().toString());
-              } catch (e) {
-                console.warn('Error setting localStorage:', e);
-              }
-
-              // Navigate to game board
-              safeNavigateToGame(navigate, roomId, dispatch, toast);
-
-              // Preserve socket connection for navigation
-              if (socketService) {
-                socketService.preserveSocketForNavigation();
-              }
-
-              toast({
-                title: "Game Starting",
-                description: "Host has started the game. Navigating to game board.",
-                status: "info",
-                duration: 3000,
-                isClosable: true,
-              });
-            } else {
-              // If no game start detected, explicitly request game state from server
-              if (socketService && socketService.socket && socketService.socket.readyState === WebSocket.OPEN) {
-                console.warn('No game start detected, requesting game state from server');
-                socketService.sendMessage('get_game_state', { full: true });
-                socketService.sendMessage('check_game_started', { gameId: roomId });
-              }
-            }
+        // Poll for game start detection every 1 second
+        gameStatePollingInterval = setInterval(() => {
+          // Request fresh game state from server
+          if (socketService && socketService.isConnected()) {
+            socketService.sendMessage('get_game_state', { full: true });
+            socketService.sendMessage('check_game_started', { gameId: roomId });
           }
-        }, 2000); // Reduced to 2 seconds for faster checking
-
-        // Second timeout - more aggressive, force navigation regardless of state
-        setTimeout(() => {
-          // Check if we're still on the room page
-          if (window.location.pathname.includes('/room/')) {
-            console.warn('Final backup timeout triggered, forcing navigation regardless of state');
-
-            // Force game state in Redux and localStorage
-            dispatch(setGameStarted(true));
-            dispatch(setGamePhase('playing'));
-            dispatch(syncGameStatus('PLAYING'));
-
-            try {
-              localStorage.setItem('kekopoly_game_started', 'true');
-              localStorage.setItem('kekopoly_game_id', roomId);
-              localStorage.setItem('kekopoly_navigation_timestamp', Date.now().toString());
-              localStorage.setItem('kekopoly_force_navigate', 'true');
-            } catch (e) {
-              console.warn('Error setting localStorage:', e);
-            }
-
-            // Try multiple navigation methods
-            safeNavigateToGame(navigate, roomId, dispatch, toast);
-
-            // Preserve socket connection
-            if (socketService) {
-              socketService.preserveSocketForNavigation();
-            }
-
-            // Last resort - use window.location
-            setTimeout(() => {
-              if (window.location.pathname.includes('/room/')) {
-                console.warn('React Router navigation failed, using window.location');
-                window.location.href = `/game/${roomId}`;
-              }
-            }, 500);
-
-            toast({
-              title: "Game Starting",
-              description: "Forcing navigation to game board.",
-              status: "warning",
-              duration: 3000,
-              isClosable: true,
-            });
-          }
-        }, 5000); // Final backup after 5 seconds total
+        }, 1000);
       }
 
       // Function to check game state and navigate if needed
@@ -1755,7 +1661,7 @@ const GameRoom = () => {
       return () => {
         if (fastIntervalId) clearInterval(fastIntervalId);
         if (slowIntervalId) clearInterval(slowIntervalId);
-        if (nonHostNavigationTimeout) clearTimeout(nonHostNavigationTimeout);
+        if (gameStatePollingInterval) clearInterval(gameStatePollingInterval);
       };
     }
   }, [navigate, roomId, dispatch, isHost, currentPlayerId, toast]);

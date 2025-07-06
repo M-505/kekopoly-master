@@ -142,10 +142,10 @@ func NewServerWithClients(cfg *config.Config, gameManager *manager.GameManager, 
 func (s *Server) configureMiddleware() {
 	s.echo.Use(middleware.Logger())
 	s.echo.Use(middleware.Recover())
-	// Configure CORS with WebSocket support
+	// Configure CORS with WebSocket support and proper preflight handling
 	s.echo.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins: []string{"*"},
-		AllowMethods: []string{echo.GET, echo.PUT, echo.POST, echo.DELETE, echo.OPTIONS},
+		AllowMethods: []string{echo.GET, echo.PUT, echo.POST, echo.DELETE, echo.OPTIONS, echo.PATCH},
 		AllowHeaders: []string{
 			echo.HeaderOrigin,
 			echo.HeaderContentType,
@@ -156,13 +156,19 @@ func (s *Server) configureMiddleware() {
 			"Connection",
 			"Sec-WebSocket-Key",
 			"Sec-WebSocket-Version",
+			"Sec-WebSocket-Extensions",
+			"Sec-WebSocket-Protocol",
+			"Cache-Control",
+			"X-Requested-With",
 		},
-		AllowCredentials: true,
+		AllowCredentials: false, // Set to false for wildcard origins
 		ExposeHeaders: []string{
 			"Upgrade",
 			"Connection",
 			"Sec-WebSocket-Accept",
+			"Sec-WebSocket-Protocol",
 		},
+		MaxAge: 86400, // 24 hours preflight cache
 	}))
 	s.echo.Use(middleware.RequestID())
 

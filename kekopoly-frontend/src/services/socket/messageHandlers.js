@@ -36,14 +36,16 @@ import {
  * @param {Object} payload - The message payload
  */
 export function sendMessage(type, payload = {}) {
-  if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-    const message = JSON.stringify({ type, ...payload });
-    this.socket.send(message);
-  } else {
-    logWarning('SOCKET', `Cannot send message type '${type}', WebSocket not open. State: ${this.socket?.readyState}`);
+  if (!this.socket) {
+    logWarning('SOCKET', `Cannot send ${type} message: No socket connection`);
+    return false;
+  }
 
+  if (this.socket.readyState !== WebSocket.OPEN) {
+    logWarning('SOCKET', `Cannot send ${type} message: Socket not open (state: ${this.socket.readyState})`);
+    
     // Queue important messages to be sent when connection is restored
-    if (['player_joined', 'update_player', 'set_player_token', 'update_player_info'].includes(type)) {
+    if (['player_joined', 'update_player', 'set_player_token', 'update_player_info', 'player_ready'].includes(type)) {
       const queuedMessage = {
         type,
         payload: {
@@ -56,6 +58,48 @@ export function sendMessage(type, payload = {}) {
       this.saveState('messageQueue', [...(this.loadState('messageQueue', [])), queuedMessage]);
       log('SOCKET', 'Message queued for later sending:', type);
     }
+    
+    return false;
+  }
+
+  // Check if socket is marked as ready (prevents race conditions)
+  if (!this.socketReady && type !== 'auth') {
+    logWarning('SOCKET', `Cannot send ${type} message: Socket not ready for messages`);
+    
+    // Queue the message for when socket becomes ready
+    if (['player_joined', 'update_player', 'set_player_token', 'update_player_info', 'player_ready'].includes(type)) {
+      const queuedMessage = {
+        type,
+        payload: {
+          ...payload,
+          gameId: this.gameId,
+          playerId: this.playerId
+        },
+        timestamp: Date.now()
+      };
+      this.saveState('messageQueue', [...(this.loadState('messageQueue', [])), queuedMessage]);
+      log('SOCKET', 'Message queued until socket is ready:', type);
+    }
+    
+    return false;
+  }
+
+  const message = {
+    type,
+    ...payload,
+    gameId: this.gameId,
+    playerId: this.playerId,
+    timestamp: Date.now()
+  };
+
+  try {
+    const messageString = JSON.stringify(message);
+    this.socket.send(messageString);
+    log('SOCKET', `Sent ${type} message:`, payload);
+    return true;
+  } catch (error) {
+    logError('SOCKET', `Failed to send ${type} message:`, error);
+    return false;
   }
 }
 
@@ -64,15 +108,17 @@ export function sendMessage(type, payload = {}) {
  */
 export function sendQueuedMessages() {
   const messageQueue = this.loadState('messageQueue', []);
-  if (messageQueue.length > 0) {
+  if (messageQueue.length > 0 && this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
     log('SOCKET', `Sending ${messageQueue.length} queued messages after reconnection`);
 
-    // Process messages in order
-    messageQueue.forEach(message => {
-      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-        log('SOCKET', `Sending queued message: ${message.type}`);
-        this.sendMessage(message.type, message.payload);
-      }
+    // Process messages in order with small delays to prevent overwhelming the socket
+    messageQueue.forEach((message, index) => {
+      setTimeout(() => {
+        if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+          log('SOCKET', `Sending queued message: ${message.type}`);
+          this.sendMessage(message.type, message.payload);
+        }
+      }, index * 100); // 100ms delay between messages
     });
 
     // Clear the queue after processing

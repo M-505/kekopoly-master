@@ -289,48 +289,65 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         // Notify about the connection status change
         this.onConnectionChange('connected');
 
-        // Dispatch a custom event that components can listen for
-        window.dispatchEvent(new CustomEvent('websocket-connected', {
-          detail: {
-            gameId: this.gameId,
-            playerId: this.playerId,
-            timestamp: timestamp
-          }
-        }));
-
-        // Request active players and game state after connection is established
-        // Using a sequence of requests with slight delays to ensure proper order
+        // Set a flag to track when the socket is truly ready for messages
+        this.socketReady = false;
+        
+        // Wait a bit before considering the socket fully ready
         setTimeout(() => {
-          log('CONNECT', 'Requesting active players after connection');
-          this.sendMessage('get_active_players');
+          this.socketReady = true;
+          log('CONNECT', 'Socket marked as ready for messages');
+          
+          // Dispatch a custom event that components can listen for
+          window.dispatchEvent(new CustomEvent('websocket-connected', {
+            detail: {
+              gameId: this.gameId,
+              playerId: this.playerId,
+              timestamp: timestamp
+            }
+          }));
 
-          // Request game state after active players
+          // Request active players and game state after connection is established
+          // Using a sequence of requests with slight delays to ensure proper order
           setTimeout(() => {
-            log('CONNECT', 'Requesting full game state after connection');
-            this.sendMessage('get_game_state', { full: true });
+            if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+              log('CONNECT', 'Requesting active players after connection');
+              this.sendMessage('get_active_players');
 
-            // Request current turn information
-            setTimeout(() => {
-              log('CONNECT', 'Requesting current turn information');
-              this.sendMessage('get_current_turn', {});
+              // Request game state after active players
+              setTimeout(() => {
+                if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+                  log('CONNECT', 'Requesting full game state after connection');
+                  this.sendMessage('get_game_state', { full: true });
 
-              // Start periodic state synchronization
-              if (this.startPeriodicStateSync) {
-                this.startPeriodicStateSync();
-              }
-            }, 100);
+                  // Request current turn information
+                  setTimeout(() => {
+                    if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+                      log('CONNECT', 'Requesting current turn information');
+                      this.sendMessage('get_current_turn', {});
+
+                      // Start periodic state synchronization
+                      if (this.startPeriodicStateSync) {
+                        this.startPeriodicStateSync();
+                      }
+                    }
+                  }, 100);
+                }
+              }, 100);
+            }
           }, 100);
-        }, 100);
+        }, 500); // Wait 500ms for socket to be truly ready
 
         resolve(); // Resolve the promise on successful connection
       };
 
       this.socket.onclose = (event) => {
+        this.socketReady = false; // Mark socket as not ready when closed
         this.handleDisconnect(event);
         // Don't automatically reject on close, let reconnect logic handle it if needed
       };
 
       this.socket.onerror = (error) => {
+        this.socketReady = false; // Mark socket as not ready on error
         logError('SOCKET', 'WebSocket Error:', error);
         this.onConnectionChange('error');
         this.onConnectionError(error); // Call the error callback
@@ -718,11 +735,11 @@ export function getConnectionState() {
 }
 
 /**
- * Check if the socket is connected
- * @returns {boolean} - True if connected
+ * Check if the socket is connected and ready
+ * @returns {boolean} - True if connected and ready
  */
 export function isConnected() {
-  return this.socket && this.socket.readyState === WebSocket.OPEN;
+  return this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady;
 }
 
 /**

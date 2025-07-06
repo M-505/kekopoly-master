@@ -23,6 +23,7 @@ class SocketService {
   // WebSocket connections
   socket = null;
   lobbySocket = null;
+  socketReady = false; // Flag to track when socket is ready for messages
 
   // Connection identifiers
   gameId = null;
