@@ -68,8 +68,6 @@ func main() {
 
 	// Initialize WebSocket hub without game manager first
 	hub := websocket.NewHub(ctx, nil, mongoClient, redisClient, sugar, redisQueue)
-	go hub.Run()
-	sugar.Info("WebSocket hub is running")
 
 	// Initialize game manager with the message queue
 	gameManager := manager.NewGameManager(ctx, mongoClient, redisClient, sugar, hub, redisQueue)
@@ -78,6 +76,10 @@ func main() {
 	// Set the game manager in the hub
 	hub.SetGameManager(gameManager)
 	sugar.Info("Game manager set in WebSocket hub")
+
+	// Start the hub's processing loop now that it's fully initialized
+	go hub.Run()
+	sugar.Info("WebSocket hub is running")
 
 	// Initialize queue worker
 	worker := queue.NewWorker(redisQueue, gameManager, logger)

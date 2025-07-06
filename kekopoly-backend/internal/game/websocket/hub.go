@@ -1751,6 +1751,94 @@ func (c *Client) handleMessage(message []byte) {
 	}
 }
 
+// Run starts the hub's event loop for processing messages.
+// It should be run in a separate goroutine.
+func (h *Hub) Run() {
+	h.logger.Info("WebSocket hub started")
+	defer h.logger.Info("WebSocket hub stopped")
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			// Context was cancelled, stop the hub
+			h.logger.Info("Hub context cancelled, shutting down.")
+			return
+
+		case client := <-h.register:
+			// Register a new client
+			h.clientsMutex.Lock()
+			if _, ok := h.clients[client.gameID]; !ok {
+				h.clients[client.gameID] = make(map[string]*Client)
+			}
+			h.clients[client.gameID][client.playerID] = client
+			h.clientsMutex.Unlock()
+
+			h.logger.Infof("Client registered: Player %s in Game %s", client.playerID, client.gameID)
+
+			// Record the new session
+			h.recordPlayerSession(client.gameID, client.playerID, client.sessionID, client.userAgent)
+
+			// Update player info cache with connection status
+			playerInfo := h.getPlayerInfo(client.gameID, client.playerID)
+			if playerInfo == nil {
+				playerInfo = make(map[string]interface{})
+			}
+			playerInfo["status"] = "CONNECTED"
+			playerInfo["connectedAt"] = time.Now().Format(time.RFC3339)
+			h.storePlayerInfo(client.gameID, client.playerID, playerInfo)
+
+			// Trigger an active players update to notify everyone
+			go client.handleGetActivePlayers()
+
+		case client := <-h.unregister:
+			// Unregister a client
+			h.clientsMutex.Lock()
+			if gameClients, ok := h.clients[client.gameID]; ok {
+				if _, ok := gameClients[client.playerID]; ok {
+					// Close the client's message queues to stop the writePump
+					close(client.highPriorityQueue)
+					close(client.normalPriorityQueue)
+					close(client.lowPriorityQueue)
+
+					// Remove the client from the map
+					delete(gameClients, client.playerID)
+					h.logger.Infof("Client unregistered: Player %s from Game %s", client.playerID, client.gameID)
+
+					// If the game has no clients left, clean up the game entry in the clients map
+					if len(gameClients) == 0 {
+						delete(h.clients, client.gameID)
+						h.logger.Infof("Game %s has no more clients, removing from hub.", client.gameID)
+					}
+				}
+			}
+			h.clientsMutex.Unlock()
+
+			// Handle the disconnection logic (updating game state, host, etc.)
+			// This is now decoupled from the client map removal
+			go h.handlePlayerDisconnected(client.gameID, client.playerID, client.sessionID)
+
+		case message := <-h.broadcast:
+			// Broadcast a message to all clients in a game
+			h.clientsMutex.RLock()
+			gameClients, ok := h.clients[message.gameID]
+			if ok {
+				for playerID, client := range gameClients {
+					if message.excludePlayerID != "" && playerID == message.excludePlayerID {
+						continue // Skip the excluded player
+					}
+					// Send with normal priority by default for broadcast messages
+					select {
+					case client.normalPriorityQueue <- message.data:
+					default:
+						h.logger.Warnf("Failed to broadcast message to player %s (queue full)", playerID)
+					}
+				}
+			}
+			h.clientsMutex.RUnlock()
+		}
+	}
+}
+
 // BroadcastToLobby sends a message to all lobby clients
 func (h *Hub) BroadcastToLobby(message []byte) {
 	h.clientsMutex.RLock()

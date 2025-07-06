@@ -284,6 +284,24 @@ func (h *GameHandler) StartGame(c echo.Context) error {
 	}
 
 	h.logger.Infof("Game %s started successfully by user %s", gameID, userID)
+
+	// Get the game state after starting
+	game, err := h.gameManager.GetGame(gameID)
+	if err != nil {
+		h.logger.Errorf("Failed to get game state after starting: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to get game state")
+	}
+
+	// Update the game state in the manager
+	if err := h.gameManager.UpdateGame(game); err != nil {
+		h.logger.Errorf("Failed to update game state after starting: %v", err)
+		// Even if this fails, the game has started, so we proceed
+	}
+
+	// Broadcast the updated game state to all clients
+	h.wsHub.BroadcastCompleteState(gameID, game)
+	h.logger.Infof("Broadcasted updated game state for game %s", gameID)
+
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -481,14 +499,12 @@ func (h *GameHandler) FixGamesWithoutCodes(c echo.Context) error {
 			// Generate a new room code for this game
 			roomCode, err := utils.GenerateRoomCode()
 			if err != nil {
-				h.logger.Errorf("Failed to generate room code for game %s: %v", game.ID.Hex(), err)
+				h.logger.Warnf("Failed to generate room code for game %s: %v", game.ID.Hex(), err)
 				continue
 			}
-
-			// Update the game with the new code
 			game.Code = roomCode
-			if err := h.gameManager.UpdateGame(game); err != nil {
-				h.logger.Errorf("Failed to update game %s with room code: %v", game.ID.Hex(), err)
+			if err := h.gameManager.UpdateGame(&game); err != nil {
+				h.logger.Warnf("Failed to update game %s with new code: %v", game.ID.Hex(), err)
 				continue
 			}
 

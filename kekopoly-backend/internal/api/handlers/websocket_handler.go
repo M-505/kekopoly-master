@@ -52,7 +52,7 @@ func (h *WebSocketHandler) StartPingPongMonitor() {
 			select {
 			case <-ticker.C:
 				// Check for inactive clients every minute
-				h.hub.CheckInactiveClients(90 * time.Second)
+				// h.hub.CheckInactiveClients(90 * time.Second)
 			}
 		}
 	}()
