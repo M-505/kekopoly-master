@@ -1045,17 +1045,14 @@ const GameRoom = () => {
         return;
       }
       
-      // Generate a unique player ID to avoid conflicts when multiple users have the same JWT userId
-      // Use a combination of JWT userId and timestamp + random string for uniqueness
-      const timestamp = Date.now().toString(36);
-      const randomStr = Math.random().toString(36).substring(2, 8);
-      const uniquePlayerId = `${jwtUserId.substring(0, 8)}_${timestamp}_${randomStr}`;
+      // Generate a consistent player ID based on JWT userId and room
+      // This ensures the same user gets the same player ID for a specific room
+      const uniquePlayerId = `${jwtUserId}_${roomId.toLowerCase()}`;
       
-      console.log('[PLAYER_REGISTRATION] Generated unique player ID:', {
+      console.log('[PLAYER_REGISTRATION] Generated consistent player ID:', {
         jwtUserId,
         uniquePlayerId,
-        timestamp,
-        randomStr,
+        roomId,
         tokenValid: !isTokenExpired(token)
       });
 

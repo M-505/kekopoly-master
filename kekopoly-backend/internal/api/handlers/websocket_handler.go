@@ -224,7 +224,7 @@ func (h *WebSocketHandler) HandleLobbyConnection(c echo.Context) error {
 	h.logger.Infof("Lobby connection successfully upgraded to WebSocket")
 
 	// Handle WebSocket connection using special lobby game ID prefix
-	h.hub.HandleLobbyWebSocketConnection(conn, userID, sessionID)
+	h.hub.HandleWebSocketConnection(conn, "lobby", userID, sessionID)
 	h.logger.Infof("Lobby WebSocket connection handed to hub")
 
 	return nil

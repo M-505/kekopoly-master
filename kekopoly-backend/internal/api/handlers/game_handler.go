@@ -135,8 +135,8 @@ func (h *GameHandler) broadcastNewGame(gameID string) {
 	// Count connected lobby clients
 	h.logger.Infof("Preparing to broadcast new game %s to lobby clients", gameID)
 
-	// Broadcast to all connected clients (using a special "lobby" game ID)
-	h.wsHub.BroadcastToGame("lobby", msgBytes)
+	// Broadcast to all connected lobby clients
+	h.wsHub.BroadcastToLobby(msgBytes)
 	h.logger.Infof("Broadcasted new game %s to all connected lobby clients", gameID)
 
 	// Also log the raw message for debugging

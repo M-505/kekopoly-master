@@ -537,6 +537,27 @@ const GameLobby = () => {
         return;
       }
       
+      // Check if the game is full
+      if (error.response?.status === 400 && 
+          (error.response?.data?.includes('game is full') || 
+           error.message?.includes('game is full'))) {
+        
+        errorMessage = 'This game room is full. Please try joining another game.';
+        shouldShowGenericError = false;
+        
+        toast({
+          title: 'Game Room Full',
+          description: errorMessage,
+          status: 'warning',
+          duration: 5000,
+          isClosable: true,
+        });
+        
+        // Refresh the game list to show updated player counts
+        refreshGameList();
+        return;
+      }
+      
       // If getting game details failed, fall back to using gameId directly
       if (error.message && error.message.includes('Failed to get game details')) {
         console.warn('Falling back to gameId for navigation due to API error');

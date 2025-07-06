@@ -12,7 +12,7 @@ import { store } from './store/store';
 import { setGameStarted, setGamePhase, syncGameStatus } from './store/gameSlice';
 import { clearGameStorageData, detectRedirectLoop } from './utils/storageUtils';
 import { v4 as uuidv4 } from 'uuid';
-import { connectSuccess } from './store/authSlice';
+import { logout } from './store/authSlice';
 import LoginForm from './components/auth/LoginForm';
 import ProtectedRoute from './components/auth/ProtectedRoute';
 import sessionMonitor from './utils/sessionMonitor';

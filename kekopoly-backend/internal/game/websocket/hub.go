@@ -944,9 +944,13 @@ func (h *Hub) Run() {
 					}()
 				}
 
-			} else {
-				h.logger.Warnf("Attempted to broadcast to non-existent game: %s", message.gameID)
-			}
+				} else {
+					h.logger.Warnf("Attempted to broadcast to non-existent game: %s", message.gameID)
+					// Skip broadcasting if this is the lobby - lobby broadcasts are handled separately
+					if message.gameID == "lobby" {
+						h.logger.Debugf("Skipping lobby broadcast - lobby connections don't use game rooms")
+					}
+				}
 			h.clientsMutex.RUnlock()
 		}
 	}
@@ -1829,22 +1833,10 @@ func (c *Client) handleMessage(message []byte) {
 					break
 				}
 			}
-			// If not found, auto-register the player in the game state
+			// Don't auto-register players here to prevent duplicates
+			// Players should only be registered through proper join game flow
 			if !found {
-				newPlayer := models.Player{
-					ID:             playerId,
-					CharacterToken: toStringOrDefault(playerInfo["token"], ""),
-					Status:         models.PlayerStatusConnected,
-					Balance:        1500, // Starting balance
-					Position:       0,    // Starting position
-				}
-				game.Players = append(game.Players, newPlayer)
-				err = c.hub.gameManager.UpdateGame(game)
-				if err != nil {
-					c.hub.logger.Warnf("[TOKEN_UPDATE] Failed to auto-register player in game DB: %v", err)
-				} else {
-					c.hub.logger.Infof("[TOKEN_UPDATE] Auto-registered player %s in game %s and updated DB", playerId, c.gameID)
-				}
+				c.hub.logger.Warnf("[TOKEN_UPDATE] Player %s not found in game %s - player should join through proper flow", playerId, c.gameID)
 			}
 		}
 
@@ -1937,20 +1929,9 @@ func (c *Client) handleMessage(message []byte) {
 					}
 				}
 				if !found {
-					newPlayer := models.Player{
-						ID:             playerId,
-						CharacterToken: toStringOrDefault(playerInfo["token"], ""),
-						Status:         models.PlayerStatusReady,
-						Balance:        1500, // Starting balance
-						Position:       0,    // Starting position
-					}
-					game.Players = append(game.Players, newPlayer)
-					err = c.hub.gameManager.UpdateGame(game)
-					if err != nil {
-						c.hub.logger.Warnf("[PLAYER_READY] Failed to auto-register player in game DB: %v", err)
-					} else {
-						c.hub.logger.Infof("[PLAYER_READY] Auto-registered player %s in game %s and updated DB", playerId, c.gameID)
-					}
+					// Don't auto-register players here to prevent duplicates
+					// Players should only be registered through proper join game flow
+					c.hub.logger.Warnf("[PLAYER_READY] Player %s not found in game %s - player should join through proper flow", playerId, c.gameID)
 				}
 			} else {
 				c.hub.logger.Warnf("[PLAYER_READY] Failed to get game %s from manager: %v", c.gameID, err)
@@ -2066,60 +2047,27 @@ func (c *Client) handleMessage(message []byte) {
 	}
 }
 
-// HandleLobbyWebSocketConnection handles WebSocket connections for the lobby
-func (h *Hub) HandleLobbyWebSocketConnection(conn *websocket.Conn, playerID, sessionID string) {
-	// Use special lobby game ID prefix to avoid conflicts with real game IDs
-	const lobbyGameID = "lobby"
-
-	// Create a new client for the lobby connection
-	client := &Client{
-		hub:                 h,
-		conn:                conn,
-		highPriorityQueue:   make(chan []byte, 256),
-		normalPriorityQueue: make(chan []byte, 256),
-		lowPriorityQueue:    make(chan []byte, 256),
-		gameID:              lobbyGameID,
-		playerID:            playerID,
-		sessionID:           sessionID,
-		lastPongTime:        time.Now(),
-		connectedAt:         time.Now(),
-		isReconnection:      false,
-	}
-
-	h.register <- client
-
-	// Start client routines in separate goroutines
-	go client.writePump()
-	go client.readPump()
-
-	// Log successful lobby connection
-	h.logger.Infof("Lobby connection established for player %s with session %s", playerID, sessionID)
-
-	// Add session info
-	h.sessionHistoryMutex.Lock()
-	if h.sessionHistory[lobbyGameID] == nil {
-		h.sessionHistory[lobbyGameID] = make(map[string][]SessionInfo)
-	}
-	h.sessionHistory[lobbyGameID][playerID] = append(h.sessionHistory[lobbyGameID][playerID], SessionInfo{
-		SessionID:    sessionID,
-		ConnectedAt:  time.Now(),
-		LastActivity: time.Now(),
-		Status:       "CONNECTED",
-	})
-	h.sessionHistoryMutex.Unlock()
-}
-
-// Helper method to get all active lobby users
-func (h *Hub) GetActiveLobbyUsers() []string {
+// BroadcastToLobby sends a message to all lobby clients
+func (h *Hub) BroadcastToLobby(message []byte) {
 	h.clientsMutex.RLock()
 	defer h.clientsMutex.RUnlock()
 
-	const lobbyGameID = "lobby"
-	users := make([]string, 0)
-	if lobbyClients, ok := h.clients[lobbyGameID]; ok {
-		for playerID := range lobbyClients {
-			users = append(users, playerID)
+	lobbyClients, exists := h.clients["lobby"]
+	if !exists || len(lobbyClients) == 0 {
+		h.logger.Debugf("No lobby clients connected for broadcast")
+		return
+	}
+
+	h.logger.Infof("Broadcasting to %d lobby clients", len(lobbyClients))
+
+	for _, client := range lobbyClients {
+		if client.isActive(90 * time.Second) {
+			select {
+			case client.normalPriorityQueue <- message:
+				// Message sent successfully
+			default:
+				h.logger.Warnf("Failed to send message to lobby client %s: queue full", client.playerID)
+			}
 		}
 	}
-	return users
 }
