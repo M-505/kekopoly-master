@@ -18,6 +18,7 @@ import * as gameHandlers from './gameHandlers';
 import * as playerHandlers from './playerHandlers';
 import * as utils from './utils';
 import * as syncUtils from './syncUtils';
+import * as registrationManager from './registrationManager';
 
 class SocketService {
   // WebSocket connections
@@ -80,6 +81,7 @@ class SocketService {
     this.isConnected = connectionHandlers.isConnected.bind(this);
     this.getConnectionState = connectionHandlers.getConnectionState.bind(this);
     this.generateSessionId = connectionHandlers.generateSessionId.bind(this);
+    this.leaveGame = connectionHandlers.leaveGame.bind(this);
 
     // Bind message handlers
     this.handleMessage = messageHandlers.handleMessage.bind(this);
@@ -136,6 +138,12 @@ class SocketService {
     this.syncPlayerDataBetweenStores = syncUtils.syncPlayerDataBetweenStores.bind(this);
     this._performPlayerDataSync = syncUtils._performPlayerDataSync.bind(this);
     this._initDebouncedSync = syncUtils._initDebouncedSync.bind(this);
+
+    // Bind registration manager methods
+    this.preventDuplicateRegistration = registrationManager.preventDuplicateRegistration.bind(this);
+    this.markPlayerAsRegistered = registrationManager.markPlayerAsRegistered.bind(this);
+    this.isPlayerAlreadyRegistered = registrationManager.isPlayerAlreadyRegistered.bind(this);
+    this.clearPlayerRegistration = registrationManager.clearPlayerRegistration.bind(this);
   }
 
   /**

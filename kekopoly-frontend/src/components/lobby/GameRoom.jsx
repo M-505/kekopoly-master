@@ -1241,13 +1241,19 @@ const GameRoom = () => {
         // (This prevents showing the player in the UI when they're not actually connected)
         dispatch(removePlayer(uniquePlayerId));
         
-        // Clear localStorage (use original roomId for localStorage keys)
-        localStorage.removeItem(`kekopoly_player_${roomId}`);
-        localStorage.removeItem(`kekopoly_player_name_${roomId}`);
-        localStorage.removeItem(`kekopoly_player_token_${roomId}`);
-        
-        // Reset state
-        setCurrentPlayerId(null);
+        // Clear localStorage only for non-recoverable errors
+        if (connectionError.message.includes('401') || connectionError.message.includes('403')) {
+          // Clear localStorage for auth errors
+          localStorage.removeItem(`kekopoly_player_${roomId}`);
+          localStorage.removeItem(`kekopoly_player_name_${roomId}`);
+          localStorage.removeItem(`kekopoly_player_token_${roomId}`);
+          
+          // Reset state for auth errors
+          setCurrentPlayerId(null);
+        } else {
+          // For non-auth errors, preserve player ID for retry
+          console.log('[PLAYER_REGISTRATION] Preserving player ID for retry after connection error');
+        }
         
         // Show specific error message
         if (connectionError.message.includes('401') || connectionError.message.includes('403')) {

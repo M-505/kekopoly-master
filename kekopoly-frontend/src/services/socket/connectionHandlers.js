@@ -270,32 +270,42 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         }
 
         // Send initial player data if available (used for the first connection)
-        if (initialPlayerData && !this.loadState('playerJoinedSent', false)) {
-          log('CONNECT', 'Sending initial player data on connection:', initialPlayerData);
+        if (initialPlayerData) {
+          log('CONNECT', 'Attempting to register player with initial data:', initialPlayerData);
 
-          // CRITICAL: Send player_joined message FIRST to establish player in backend
-          this.sendMessage('player_joined', {
-            player: initialPlayerData // Use correct format that backend expects
-          });
+          // Use registration manager to prevent duplicates
+          const registrationManager = this.preventDuplicateRegistration();
+          
+          // Check if already registered
+          if (!this.isPlayerAlreadyRegistered(this.playerId, this.gameId)) {
+            registrationManager.attemptRegistration(
+              this.gameId, 
+              this.playerId, 
+              { player: initialPlayerData }
+            ).then((registrationResult) => {
+              if (registrationResult.success) {
+                log('CONNECT', 'Player registration initiated successfully');
+                
+                // Only send token update if player has a token and registration was successful
+                if (initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji) {
+                  // Use message queue to ensure proper sequencing
+                  this.queueMessage('update_player_info', {
+                    playerId: this.playerId,
+                    token: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
+                    characterToken: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
+                    emoji: initialPlayerData.emoji || initialPlayerData.token || '👤'
+                  }, 'low', 500); // Low priority, 500ms delay to ensure player_joined is processed first
 
-          // Mark that we've sent the player_joined message to prevent loops
-          this.saveState('playerJoinedSent', true);
-          this.saveState('lastSentPlayerData', initialPlayerData);
-
-          // Only send token update if player has a token and we haven't sent it yet
-          if ((initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji) && 
-              !this.loadState('tokenUpdateSent', false)) {
-            
-            // Use message queue to ensure proper sequencing
-            this.queueMessage('update_player_info', {
-              playerId: this.playerId,
-              token: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
-              characterToken: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
-              emoji: initialPlayerData.emoji || initialPlayerData.token || '👤'
-            }, 'low', 500); // Low priority, 500ms delay to ensure player_joined is processed first
-
-            this.saveState('tokenUpdateSent', true);
-            log('CONNECT', 'Queued token update after player join');
+                  log('CONNECT', 'Queued token update after player registration');
+                }
+              } else {
+                logWarning('CONNECT', 'Player registration failed:', registrationResult.reason);
+              }
+            }).catch((error) => {
+              logError('CONNECT', 'Registration error:', error);
+            });
+          } else {
+            log('CONNECT', 'Player already registered, skipping duplicate registration');
           }
 
         } else if (this.initialPlayerDataToSend && !this.loadState('playerJoinedSent', false)) {
@@ -881,6 +891,11 @@ export function leaveGame() {
     } catch (e) {
       logWarning('LEAVE', 'Failed to send leave_game message:', e);
     }
+  }
+
+  // Clear player registration to prevent duplicates when rejoining
+  if (this.clearPlayerRegistration && this.gameId && this.playerId) {
+    this.clearPlayerRegistration(this.playerId, this.gameId);
   }
 
   // Reset registration state when leaving
