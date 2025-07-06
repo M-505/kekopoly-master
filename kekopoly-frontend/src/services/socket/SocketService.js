@@ -82,6 +82,7 @@ class SocketService {
     this.getConnectionState = connectionHandlers.getConnectionState.bind(this);
     this.generateSessionId = connectionHandlers.generateSessionId.bind(this);
     this.leaveGame = connectionHandlers.leaveGame.bind(this);
+    this.resetPlayerRegistrationState = connectionHandlers.resetPlayerRegistrationState.bind(this);
 
     // Bind message handlers
     this.handleMessage = messageHandlers.handleMessage.bind(this);
@@ -144,6 +145,7 @@ class SocketService {
     this.markPlayerAsRegistered = registrationManager.markPlayerAsRegistered.bind(this);
     this.isPlayerAlreadyRegistered = registrationManager.isPlayerAlreadyRegistered.bind(this);
     this.clearPlayerRegistration = registrationManager.clearPlayerRegistration.bind(this);
+    this.handleRegistrationConflict = registrationManager.handleRegistrationConflict.bind(this);
   }
 
   /**

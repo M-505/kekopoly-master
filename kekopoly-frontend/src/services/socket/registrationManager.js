@@ -132,6 +132,29 @@ export class RegistrationManager {
   }
 
   /**
+   * Handle registration conflict (409 error)
+   * This clears the conflicting registration and allows retry
+   */
+  handleRegistrationConflict(playerId, gameId) {
+    logWarning('REGISTRATION', `Registration conflict detected for player ${playerId} in game ${gameId}`);
+    
+    // Clear the conflicting registration
+    this.clearPlayerRegistration(playerId, gameId);
+    
+    // Reset registration state
+    this.isRegistering = false;
+    this.registrationAttempts = 0;
+    
+    // Clear related localStorage entries
+    const registrationKey = `kekopoly_registered_${gameId}_${playerId}`;
+    localStorage.removeItem(registrationKey);
+    localStorage.removeItem('playerJoinedSent');
+    localStorage.removeItem('tokenUpdateSent');
+    
+    log('REGISTRATION', 'Cleared conflicting registration, ready for fresh attempt');
+  }
+
+  /**
    * Reset registration state (for cleanup or errors)
    */
   reset() {
@@ -224,4 +247,15 @@ export function clearPlayerRegistration(playerId, gameId) {
   localStorage.removeItem(registrationKey);
   
   log('REGISTRATION', 'Player registration cleared from all sources');
+}
+
+/**
+ * Handle registration conflict (409 error)
+ */
+export function handleRegistrationConflict(playerId, gameId) {
+  if (this.registrationManager) {
+    this.registrationManager.handleRegistrationConflict(playerId, gameId);
+  }
+  
+  log('REGISTRATION', 'Handled registration conflict, ready for retry');
 }

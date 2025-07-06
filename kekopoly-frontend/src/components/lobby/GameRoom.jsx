@@ -1250,6 +1250,26 @@ const GameRoom = () => {
           
           // Reset state for auth errors
           setCurrentPlayerId(null);
+        } else if (connectionError.message.includes('409')) {
+          // Handle registration conflict (409 error)
+          console.log('[PLAYER_REGISTRATION] Registration conflict detected, clearing and retrying');
+          
+          // Clear conflicting registration
+          if (socketService.handleRegistrationConflict) {
+            socketService.handleRegistrationConflict(uniquePlayerId, roomId);
+          }
+          
+          // Show user-friendly message
+          toast({
+            title: "Registration Conflict",
+            description: "Another session was detected. Please try joining again.",
+            status: "warning",
+            duration: 3000,
+            isClosable: true,
+          });
+          
+          // Don't clear player ID for 409 errors - allow retry
+          return;
         } else {
           // For non-auth errors, preserve player ID for retry
           console.log('[PLAYER_REGISTRATION] Preserving player ID for retry after connection error');

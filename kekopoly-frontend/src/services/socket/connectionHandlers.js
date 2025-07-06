@@ -350,6 +350,13 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         this.socketReady = true;
         log('CONNECT', 'Socket marked as ready for messages');
 
+        // Process any queued messages now that socket is ready
+        setTimeout(() => {
+          if (this.sendQueuedMessages) {
+            this.sendQueuedMessages();
+          }
+        }, 100); // Small delay to ensure auth is processed
+
         // Notify about the connection status change
         this.onConnectionChange('connected');
         
@@ -861,14 +868,36 @@ export function markPlayerAsRegistered() {
 
 /**
  * Reset player registration state
- * Call this when starting a new game or connection
+ * This clears any registration tracking to allow fresh registrations
  */
 export function resetPlayerRegistrationState() {
-  this.saveState('playerJoinedSent', false);
-  this.saveState('tokenUpdateSent', false);
-  this.saveState('initialPlayerDataSent', false);
-  this.saveState('playerRegisteredInBackend', false);
-  log('CONNECT', 'Player registration state reset');
+  log('REGISTRATION', 'Resetting player registration state');
+  
+  // Reset registration manager if it exists
+  if (this.registrationManager) {
+    this.registrationManager.reset();
+  }
+  
+  // Clear registration-related localStorage entries
+  try {
+    const gameId = this.gameId;
+    const playerId = this.playerId;
+    
+    if (gameId && playerId) {
+      const registrationKey = `kekopoly_registered_${gameId}_${playerId}`;
+      localStorage.removeItem(registrationKey);
+    }
+    
+    // Clear general registration state
+    localStorage.removeItem('playerJoinedSent');
+    localStorage.removeItem('tokenUpdateSent');
+    localStorage.removeItem('lastSentPlayerData');
+    localStorage.removeItem('messageQueue');
+    
+    log('REGISTRATION', 'Cleared registration state from localStorage');
+  } catch (e) {
+    logWarning('REGISTRATION', 'Error clearing registration state:', e);
+  }
 }
 
 /**
