@@ -34,7 +34,17 @@ export function connectToLobby(token, playerId) {
     // Strip the "Bearer " prefix from the token if present
     const tokenValue = this.token.startsWith('Bearer ') ? this.token.substring(7) : this.token;
     const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.hostname === 'localhost' ? 'localhost:8080' : window.location.host;
+    
+    // Determine the host for lobby connection
+    let host;
+    if (import.meta.env.VITE_WS_BASE_URL) {
+      host = import.meta.env.VITE_WS_BASE_URL.replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '');
+    } else if (window.location.hostname === 'localhost') {
+      host = 'localhost:8080';
+    } else {
+      host = window.location.host;
+    }
+    
     const wsUrl = `${socketProtocol}//${host}/ws/lobby?sessionId=${this.sessionId}&token=${encodeURIComponent(tokenValue)}`;
 
     this.lobbySocket = new WebSocket(wsUrl);

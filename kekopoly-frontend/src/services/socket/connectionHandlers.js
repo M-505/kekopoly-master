@@ -158,7 +158,20 @@ export function connect(gameId, playerId, token, initialPlayerData) {
 
     // Use protocol based on current page protocol (ws or wss)
     const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.hostname === 'localhost' ? 'localhost:8080' : window.location.host;
+    
+    // Determine the host for WebSocket connection
+    let host;
+    if (import.meta.env.VITE_API_URL) {
+      // Use API URL environment variable and convert to WebSocket host
+      const apiUrl = import.meta.env.VITE_API_URL;
+      host = apiUrl.replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '');
+    } else if (window.location.hostname === 'localhost') {
+      // Development mode
+      host = 'localhost:8080';
+    } else {
+      // Production mode - use current host
+      host = window.location.host;
+    }
 
     // Prepare token for URL (remove 'Bearer ' prefix when using in query parameter)
     const urlToken = tokenValue.replace('Bearer ', '');
@@ -286,56 +299,57 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         this.reconnectAttempts = 0;
         clearTimeout(this.reconnectTimer); // Clear any existing reconnect timer
 
+        // Set socket as ready immediately after auth message is sent
+        this.socketReady = true;
+        log('CONNECT', 'Socket marked as ready for messages');
+
         // Notify about the connection status change
         this.onConnectionChange('connected');
-
-        // Set a flag to track when the socket is truly ready for messages
-        this.socketReady = false;
         
-        // Wait a bit before considering the socket fully ready
+        // Dispatch a custom event that components can listen for
+        window.dispatchEvent(new CustomEvent('websocket-connected', {
+          detail: {
+            gameId: this.gameId,
+            playerId: this.playerId,
+            timestamp: timestamp
+          }
+        }));
+
+        // Send any queued messages immediately after socket becomes ready
         setTimeout(() => {
-          this.socketReady = true;
-          log('CONNECT', 'Socket marked as ready for messages');
-          
-          // Dispatch a custom event that components can listen for
-          window.dispatchEvent(new CustomEvent('websocket-connected', {
-            detail: {
-              gameId: this.gameId,
-              playerId: this.playerId,
-              timestamp: timestamp
-            }
-          }));
+          if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+            this.sendQueuedMessages();
+          }
+        }, 100);
 
-          // Request active players and game state after connection is established
-          // Using a sequence of requests with slight delays to ensure proper order
-          setTimeout(() => {
-            if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
-              log('CONNECT', 'Requesting active players after connection');
-              this.sendMessage('get_active_players');
+        // Request initial game state after socket is ready
+        setTimeout(() => {
+          if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+            log('CONNECT', 'Requesting active players after connection');
+            this.sendMessage('get_active_players');
 
-              // Request game state after active players
-              setTimeout(() => {
-                if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
-                  log('CONNECT', 'Requesting full game state after connection');
-                  this.sendMessage('get_game_state', { full: true });
+            // Request game state after active players
+            setTimeout(() => {
+              if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+                log('CONNECT', 'Requesting full game state after connection');
+                this.sendMessage('get_game_state', { full: true });
 
-                  // Request current turn information
-                  setTimeout(() => {
-                    if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
-                      log('CONNECT', 'Requesting current turn information');
-                      this.sendMessage('get_current_turn', {});
+                // Request current turn information
+                setTimeout(() => {
+                  if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+                    log('CONNECT', 'Requesting current turn information');
+                    this.sendMessage('get_current_turn', {});
 
-                      // Start periodic state synchronization
-                      if (this.startPeriodicStateSync) {
-                        this.startPeriodicStateSync();
-                      }
+                    // Start periodic state synchronization
+                    if (this.startPeriodicStateSync) {
+                      this.startPeriodicStateSync();
                     }
-                  }, 100);
-                }
-              }, 100);
-            }
-          }, 100);
-        }, 500); // Wait 500ms for socket to be truly ready
+                  }
+                }, 100);
+              }
+            }, 100);
+          }
+        }, 200); // Wait 200ms for auth to process
 
         resolve(); // Resolve the promise on successful connection
       };
@@ -688,12 +702,25 @@ export function handleError(error) {
   log('WS_ERROR', `Connection details - GameID: ${this.gameId}, PlayerID: ${this.playerId}`);
 
   const socketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.location.hostname === 'localhost' ? 'localhost:8080' : window.location.host;
+  
+  // Determine the host for error diagnostics
+  let host;
+  if (import.meta.env.VITE_API_URL) {
+    // Use API URL environment variable and convert to WebSocket host
+    const apiUrl = import.meta.env.VITE_API_URL;
+    host = apiUrl.replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '');
+  } else if (window.location.hostname === 'localhost') {
+    host = 'localhost:8080';
+  } else {
+    host = window.location.host;
+  }
+  
   const wsUrl = `${socketProtocol}//${host}/ws`;
   log('WS_ERROR', `Auth token: ${this.token ? (this.token.substring(0, 10) + '...') : 'none'}, URL base: ${wsUrl}`);
 
-  // Try to detect the specific issue
-  fetch(`http://localhost:8080/health`)
+  // Try to detect the specific issue - use correct protocol for health check
+  const healthUrl = `${window.location.protocol}//${host}/health`;
+  fetch(healthUrl)
     .then(response => {
       log('WS_ERROR', 'Backend health check response:', response.status);
     })

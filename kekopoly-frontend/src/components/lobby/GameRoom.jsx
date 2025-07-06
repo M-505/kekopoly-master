@@ -268,14 +268,48 @@ const GameRoom = () => {
   // Broadcast current player information to other clients with debouncing
   const broadcastPlayerInfo = useCallback((initialPlayerData = null) => {
 
-    if (!currentPlayerId || !socketService || !socketService.isConnected()) {
-      console.log('[PLAYER_DISPLAY] Cannot broadcast player info: Socket not ready or missing info', { 
-        currentPlayerId, 
+    // Enhanced validation for currentPlayerId
+    if (!currentPlayerId || currentPlayerId === 'null' || currentPlayerId === 'undefined') {
+      console.log('[PLAYER_DISPLAY] Cannot broadcast player info: Invalid or missing currentPlayerId', { 
+        currentPlayerId,
+        type: typeof currentPlayerId 
+      });
+      return;
+    }
+
+    if (!socketService || !socketService.isConnected()) {
+      console.log('[PLAYER_DISPLAY] Cannot broadcast player info: Socket not ready', { 
+        socketExists: !!socketService,
         socketConnected: socketService?.socket?.readyState === WebSocket.OPEN,
         socketReady: socketService?.socketReady 
       });
       return;
     }
+
+    // Enhanced debounce check with global debounce tracking
+    const debounceKey = `lastBroadcast_${currentPlayerId}`;
+    const globalDebounceKey = 'lastAnyPlayerBroadcast';
+    
+    if (!window[debounceKey]) { window[debounceKey] = 0; }
+    if (!window[globalDebounceKey]) { window[globalDebounceKey] = 0; }
+    
+    const now = Date.now();
+    
+    // Per-player debounce: 2 seconds
+    if (now - window[debounceKey] < 2000) {
+      console.log('[PLAYER_DISPLAY] Skipping broadcast due to per-player debounce');
+      return;
+    }
+    
+    // Global debounce: 500ms (prevent any player broadcasts too close together)
+    if (now - window[globalDebounceKey] < 500) {
+      console.log('[PLAYER_DISPLAY] Skipping broadcast due to global debounce');
+      return;
+    }
+    
+    // Update debounce timestamps
+    window[debounceKey] = now;
+    window[globalDebounceKey] = now;
 
     // --- Use initialPlayerData if provided, otherwise get from Redux store ---
     let dataToSend = initialPlayerData;
@@ -301,17 +335,14 @@ const GameRoom = () => {
         console.log('[PLAYER_DISPLAY] Created fallback player data:', dataToSend);
       }
     }
-    console.log('[PLAYER_DISPLAY] Broadcasting player info using data:', dataToSend);
-
-    // Improved debounce check - use per-player debouncing
-    const debounceKey = `lastBroadcast_${currentPlayerId}`;
-    if (!window[debounceKey]) { window[debounceKey] = 0; }
-    const now = Date.now();
-    if (now - window[debounceKey] < 2000) { // 2 second debounce per player
-      console.log('[PLAYER_DISPLAY] Skipping broadcast due to debounce');
+    
+    // Final validation of dataToSend
+    if (!dataToSend || !dataToSend.id) {
+      console.error('[PLAYER_DISPLAY] Cannot broadcast: Invalid player data', dataToSend);
       return;
     }
-    window[debounceKey] = now;
+    
+    console.log('[PLAYER_DISPLAY] Broadcasting player info using data:', dataToSend);
 
     // Always try to get emoji and color from token first for consistency
     let emoji = '👤';
@@ -349,13 +380,26 @@ const GameRoom = () => {
     };
 
     console.log('[PLAYER_DISPLAY] Sending player_joined message:', playerMessage);
-    socketService.sendMessage('player_joined', playerMessage);
+    
+    try {
+      const success = socketService.sendMessage('player_joined', playerMessage);
+      if (!success) {
+        console.warn('[PLAYER_DISPLAY] Failed to send player_joined message - message may be queued');
+      }
+    } catch (error) {
+      console.error('[PLAYER_DISPLAY] Error sending player_joined message:', error);
+      return; // Exit early if broadcast failed
+    }
 
     // After broadcasting, also request the current active players to ensure sync
     setTimeout(() => {
       if (socketService && socketService.isConnected()) {
         console.log('[PLAYER_DISPLAY] Requesting active players after broadcast');
-        socketService.sendMessage('get_active_players', {});
+        try {
+          socketService.sendMessage('get_active_players', {});
+        } catch (error) {
+          console.warn('[PLAYER_DISPLAY] Error requesting active players:', error);
+        }
       }
     }, 500);
 
@@ -445,7 +489,9 @@ const GameRoom = () => {
         console.log(`[ROOM_VALIDATION] Validating room: ${roomId}`);
         
         // Check if the room/game exists by calling the backend API
-        const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'}/api/v1/games/${roomId}`, {
+        const apiBaseUrl = import.meta.env.VITE_API_URL || 
+                         (window.location.hostname === 'localhost' ? 'http://localhost:8080' : `${window.location.protocol}//${window.location.host}`);
+        const response = await fetch(`${apiBaseUrl}/api/v1/games/${roomId}`, {
           headers: {
             'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json'
@@ -602,6 +648,13 @@ const GameRoom = () => {
     const storedCharacterToken = localStorage.getItem(`kekopoly_player_token_${roomId}`);
     // ---
 
+    // Validate stored player ID
+    if (storedPlayerId && storedPlayerId !== 'null' && storedPlayerId !== 'undefined' && storedPlayerId.trim() !== '') {
+      console.log('[PLAYER_RECOVERY] Found valid stored player ID:', storedPlayerId);
+    } else {
+      console.log('[PLAYER_RECOVERY] No valid stored player ID found:', storedPlayerId);
+    }
+
     // Request active players immediately to ensure we have the latest player list
     if (socketService && socketService.socket && socketService.socket.readyState === WebSocket.OPEN) {
       socketService.sendMessage('get_active_players', {});
@@ -612,8 +665,8 @@ const GameRoom = () => {
       }
     }
 
-    if (storedPlayerId) {
-      // console.log('Found existing player ID in localStorage:', storedPlayerId);
+    if (storedPlayerId && storedPlayerId !== 'null' && storedPlayerId !== 'undefined' && storedPlayerId.trim() !== '') {
+      console.log('[PLAYER_RECOVERY] Attempting to recover player session:', storedPlayerId);
       setCurrentPlayerId(storedPlayerId); // Set the state
 
       // --- Attempt connection ONLY if we found a valid player ID AND the AUTH token ---
@@ -1524,18 +1577,46 @@ const GameRoom = () => {
       // This is for ALL players (including host) to detect game start confirmation
       let gameStatePollingInterval = null;
 
-      // Set up polling for all players since everyone waits for WebSocket confirmation
-      if (currentPlayerId) {
-        console.log('[GAME_POLLING] Setting up game state polling for all players');
+      // Only set up polling if player is registered, socket is connected, and we have a valid player ID
+      if (currentPlayerId && 
+          currentPlayerId !== 'null' && 
+          currentPlayerId !== 'undefined' &&
+          socketService && 
+          socketService.isConnected() &&
+          isRegistered) {
+        
+        console.log('[GAME_POLLING] Setting up game state polling for registered player:', currentPlayerId);
 
-        // Poll for game start detection every 1 second
-        gameStatePollingInterval = setInterval(() => {
-          // Request fresh game state from server
+        // Wait a bit before starting polling to ensure everything is initialized
+        const pollingTimeout = setTimeout(() => {
           if (socketService && socketService.isConnected()) {
-            socketService.sendMessage('get_game_state', { full: true });
-            socketService.sendMessage('check_game_started', { gameId: roomId });
+            // Poll for game start detection every 2 seconds (reduced frequency)
+            gameStatePollingInterval = setInterval(() => {
+              // Only poll if socket is still connected and ready
+              if (socketService && socketService.isConnected()) {
+                try {
+                  socketService.sendMessage('get_game_state', { full: true });
+                  socketService.sendMessage('check_game_started', { gameId: roomId });
+                } catch (error) {
+                  console.warn('[GAME_POLLING] Error sending polling messages:', error);
+                }
+              }
+            }, 2000); // Increased to 2 seconds to reduce load
           }
-        }, 1000);
+        }, 1000); // Wait 1 second before starting polling
+
+        return () => {
+          clearTimeout(pollingTimeout);
+          if (gameStatePollingInterval) {
+            clearInterval(gameStatePollingInterval);
+          }
+        };
+      } else {
+        console.log('[GAME_POLLING] Skipping polling setup - prerequisites not met:', {
+          currentPlayerId: !!currentPlayerId,
+          socketConnected: socketService?.isConnected(),
+          isRegistered
+        });
       }
 
       // Function to check game state and navigate if needed
@@ -1664,7 +1745,7 @@ const GameRoom = () => {
         if (gameStatePollingInterval) clearInterval(gameStatePollingInterval);
       };
     }
-  }, [navigate, roomId, dispatch, isHost, currentPlayerId, toast]);
+  }, [navigate, roomId, dispatch, isHost, currentPlayerId, toast, socketService, isRegistered]);
 
   // Enhanced player synchronization effect - ensures all players see each other
   useEffect(() => {

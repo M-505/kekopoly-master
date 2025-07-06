@@ -66,19 +66,32 @@ export function sendMessage(type, payload = {}) {
   if (!this.socketReady && type !== 'auth') {
     logWarning('SOCKET', `Cannot send ${type} message: Socket not ready for messages`);
     
-    // Queue the message for when socket becomes ready
+    // Queue important messages for when socket becomes ready (avoid duplicates)
     if (['player_joined', 'update_player', 'set_player_token', 'update_player_info', 'player_ready'].includes(type)) {
-      const queuedMessage = {
-        type,
-        payload: {
-          ...payload,
-          gameId: this.gameId,
-          playerId: this.playerId
-        },
-        timestamp: Date.now()
-      };
-      this.saveState('messageQueue', [...(this.loadState('messageQueue', [])), queuedMessage]);
-      log('SOCKET', 'Message queued until socket is ready:', type);
+      const messageQueue = this.loadState('messageQueue', []);
+      
+      // Check if this message type is already queued for this player to avoid duplicates
+      const existingMessage = messageQueue.find(msg => 
+        msg.type === type && 
+        msg.payload.playerId === this.playerId &&
+        (Date.now() - msg.timestamp) < 5000 // Only consider recent messages
+      );
+      
+      if (!existingMessage) {
+        const queuedMessage = {
+          type,
+          payload: {
+            ...payload,
+            gameId: this.gameId,
+            playerId: this.playerId
+          },
+          timestamp: Date.now()
+        };
+        this.saveState('messageQueue', [...messageQueue, queuedMessage]);
+        log('SOCKET', 'Message queued until socket is ready:', type);
+      } else {
+        log('SOCKET', 'Message already queued, skipping duplicate:', type);
+      }
     }
     
     return false;
@@ -99,6 +112,23 @@ export function sendMessage(type, payload = {}) {
     return true;
   } catch (error) {
     logError('SOCKET', `Failed to send ${type} message:`, error);
+    
+    // If it's a critical message that failed, queue it for retry
+    if (['player_joined', 'update_player', 'set_player_token', 'update_player_info', 'player_ready'].includes(type)) {
+      const queuedMessage = {
+        type,
+        payload: {
+          ...payload,
+          gameId: this.gameId,
+          playerId: this.playerId
+        },
+        timestamp: Date.now()
+      };
+      const currentQueue = this.loadState('messageQueue', []);
+      this.saveState('messageQueue', [...currentQueue, queuedMessage]);
+      log('SOCKET', 'Message queued due to send error:', type);
+    }
+    
     return false;
   }
 }
@@ -109,14 +139,49 @@ export function sendMessage(type, payload = {}) {
 export function sendQueuedMessages() {
   const messageQueue = this.loadState('messageQueue', []);
   if (messageQueue.length > 0 && this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
-    log('SOCKET', `Sending ${messageQueue.length} queued messages after reconnection`);
+    log('SOCKET', `Processing ${messageQueue.length} queued messages after connection ready`);
 
-    // Process messages in order with small delays to prevent overwhelming the socket
-    messageQueue.forEach((message, index) => {
+    // Filter out duplicate messages and old messages (older than 30 seconds)
+    const now = Date.now();
+    const uniqueMessages = [];
+    const seenMessages = new Set();
+    
+    messageQueue.forEach(message => {
+      // Skip old messages
+      if (now - message.timestamp > 30000) {
+        log('SOCKET', `Skipping old queued message: ${message.type}`);
+        return;
+      }
+      
+      // Create a unique key for this message type and player
+      const messageKey = `${message.type}-${message.payload.playerId}`;
+      
+      // Only keep the most recent message of each type per player
+      if (!seenMessages.has(messageKey)) {
+        seenMessages.add(messageKey);
+        uniqueMessages.push(message);
+      } else {
+        log('SOCKET', `Skipping duplicate queued message: ${message.type}`);
+      }
+    });
+
+    // Process unique messages with error handling
+    let successCount = 0;
+    uniqueMessages.forEach((message, index) => {
       setTimeout(() => {
         if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
-          log('SOCKET', `Sending queued message: ${message.type}`);
-          this.sendMessage(message.type, message.payload);
+          log('SOCKET', `Sending queued message ${index + 1}/${uniqueMessages.length}: ${message.type}`);
+          const success = this.sendMessage(message.type, message.payload);
+          if (success) {
+            successCount++;
+          }
+          
+          // Log summary after all messages are processed
+          if (index === uniqueMessages.length - 1) {
+            log('SOCKET', `Completed sending queued messages: ${successCount}/${uniqueMessages.length} successful`);
+          }
+        } else {
+          logWarning('SOCKET', `Cannot send queued message ${message.type}: Socket no longer ready`);
         }
       }, index * 100); // 100ms delay between messages
     });

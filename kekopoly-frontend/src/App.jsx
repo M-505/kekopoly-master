@@ -115,7 +115,9 @@ function App() {
             }
 
             // Make an API call to verify the game exists
-            const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'}/api/v1/games/${storedGameId}`, {
+            const apiBaseUrl = import.meta.env.VITE_API_URL || 
+                             (window.location.hostname === 'localhost' ? 'http://localhost:8080' : `${window.location.protocol}//${window.location.host}`);
+            const response = await fetch(`${apiBaseUrl}/api/v1/games/${storedGameId}`, {
               headers: {
                 'Authorization': token.startsWith('Bearer ') ? token : `Bearer ${token}`,
                 'Content-Type': 'application/json'
