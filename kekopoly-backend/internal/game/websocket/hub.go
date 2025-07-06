@@ -384,7 +384,7 @@ func (h *Hub) recordPlayerSession(gameID, playerID, sessionID string, clientInfo
 		playerID, normalizedGameID, sessionID)
 }
 
-// updateSessionStatus updates the status of a player session
+// updateSessionStatus updates the status of a session in the history
 func (h *Hub) updateSessionStatus(gameID, playerID, sessionID, status string) {
 	h.sessionHistoryMutex.Lock()
 	defer h.sessionHistoryMutex.Unlock()
@@ -438,6 +438,33 @@ func (h *Hub) getPlayerSessions(gameID, playerID string) []SessionInfo {
 	}
 
 	return nil
+}
+
+// updateGameInfoCache fetches the latest game state from the GameManager and updates the hub's cache.
+func (h *Hub) updateGameInfoCache(gameID string) {
+	game, err := h.gameManager.GetGame(gameID)
+	if err != nil {
+		h.logger.Warnf("[updateGameInfoCache] Failed to get game %s from game manager: %v", gameID, err)
+		return
+	}
+
+	if game == nil {
+		h.logger.Warnf("[updateGameInfoCache] Game %s not found by game manager", gameID)
+		return
+	}
+
+	// Create a map from the game model to store in the cache
+	gameInfo := map[string]interface{}{
+		"id":         game.ID.Hex(),
+		"name":       game.Name,
+		"status":     game.Status,
+		"hostId":     game.HostID,
+		"maxPlayers": game.MaxPlayers,
+		"code":       game.Code,
+	}
+
+	h.storeGameInfo(gameID, gameInfo)
+	h.logger.Infof("[updateGameInfoCache] Updated game info cache for game %s", gameID)
 }
 
 // getLatestSession retrieves the most recent session for a player in a game
@@ -555,12 +582,8 @@ func (h *Hub) UpdateHostID(gameID string, hostID string) {
 
 // handlePlayerDisconnected handles a player disconnection
 func (h *Hub) handlePlayerDisconnected(gameID, playerID, sessionID string) {
-	// Log the event
 	h.logger.Infof("[Hub handlePlayerDisconnected] Player %s disconnected from game %s with session %s",
 		playerID, gameID, sessionID)
-
-	// Update session status in session history
-	h.updateSessionStatus(gameID, playerID, sessionID, "DISCONNECTED")
 
 	// Ensure gameManager is not nil
 	if h.gameManager == nil {
@@ -568,398 +591,82 @@ func (h *Hub) handlePlayerDisconnected(gameID, playerID, sessionID string) {
 		return
 	}
 
-	// Notify the game manager about the disconnection using the session ID
-	h.gameManager.PlayerDisconnected(gameID, sessionID) // Calls gameManager.PlayerDisconnected with gameID and sessionID
+	// --- REORDERED AND IMPROVED LOGIC ---
 
-	// Update player status in playerInfo
+	// 1. Immediately and atomically update the player's status in the central GameManager.
+	// This makes the GameManager the single source of truth and prevents race conditions.
+	newHostID, err := h.gameManager.PlayerDisconnected(gameID, playerID)
+	if err != nil {
+		h.logger.Warnf("[Hub handlePlayerDisconnected] GameManager failed to process disconnection for player %s in game %s: %v", playerID, gameID, err)
+		// We might still continue to try and clean up the hub's state
+	}
+
+	// 2. Update the Hub's local session history. This is now a secondary action.
+	h.updateSessionStatus(gameID, playerID, sessionID, "DISCONNECTED")
+
+	// 3. Update the Hub's local player info cache.
 	playerInfo := h.getPlayerInfo(gameID, playerID)
 	if playerInfo != nil {
 		playerInfo["status"] = "DISCONNECTED"
 		disconnectTime := time.Now().Format(time.RFC3339)
 		playerInfo["disconnectedAt"] = disconnectTime
 		h.storePlayerInfo(gameID, playerID, playerInfo)
-		h.logger.Infof("[Hub handlePlayerDisconnected] Updated player %s status to DISCONNECTED in game %s at %s",
+		h.logger.Infof("[Hub handlePlayerDisconnected] Updated hub cache for player %s to DISCONNECTED in game %s at %s",
 			playerID, gameID, disconnectTime)
 	} else {
-		h.logger.Warnf("[Hub handlePlayerDisconnected] Could not find player info for %s in game %s",
+		h.logger.Warnf("[Hub handlePlayerDisconnected] Could not find player info in hub cache for %s in game %s",
 			playerID, gameID)
 	}
 
-	// Check if this player is the host
-	gameInfo := h.getGameInfo(gameID)
-	if gameInfo != nil && gameInfo["hostId"] != nil {
-		hostID, ok := gameInfo["hostId"].(string)
-		if ok && hostID == playerID {
-			// h.logger.Infof("Host player %s disconnected from game %s, finding new host", playerID, gameID)
-
-			// Find a new host among connected players
-			h.clientsMutex.RLock()
-			var newHostID string
-
-			if gamePlayers, ok := h.clients[gameID]; ok {
-				for pid, client := range gamePlayers {
-					if pid != playerID && client.isActive(90*time.Second) {
-						newHostID = pid
-						break
-					}
-				}
-			}
-			h.clientsMutex.RUnlock()
-
-			// If we found a new host, update the game
-			if newHostID != "" {
-				// h.logger.Infof("Transferring host from %s to %s in game %s", playerID, newHostID, gameID)
-
-				// Update host ID
-				h.UpdateHostID(gameID, newHostID)
-			} else {
-				h.logger.Warnf("No active players to transfer host to in game %s. Game will be cleaned up.", gameID)
-				// The game will be cleaned up through the PlayerDisconnected method in GameManager
-			}
+	// 4. If a new host was assigned by the GameManager, broadcast the host_changed event.
+	if newHostID != "" {
+		h.logger.Infof("[Hub handlePlayerDisconnected] New host is %s. Broadcasting host_changed event for game %s.", newHostID, gameID)
+		hostChangeMsg := map[string]interface{}{
+			"type":   "host_changed",
+			"hostId": newHostID,
+			"gameId": gameID,
+		}
+		msgBytes, err := json.Marshal(hostChangeMsg)
+		if err != nil {
+			h.logger.Errorf("[Hub handlePlayerDisconnected] Failed to marshal host change message for game %s: %v", gameID, err)
+		} else {
+			h.BroadcastToGame(gameID, msgBytes)
 		}
 	}
 
-	// Broadcast player disconnection to all clients
-	disconnectMsg := map[string]interface{}{
-		"type":     "player_disconnected",
-		"playerId": playerID,
-		"gameId":   gameID,
-	}
+	// 5. Finally, broadcast the updated list of active players to ensure all clients are in sync.
+	h.logger.Infof("[Hub handlePlayerDisconnected] Broadcasting active_players update for game %s after disconnection.", gameID)
+	// Use a goroutine to avoid blocking the hub's main loop while fetching players
+	go func() {
+		time.Sleep(250 * time.Millisecond) // Small delay to allow clients to process other messages
 
-	// Marshal to JSON
-	msgBytes, err := json.Marshal(disconnectMsg)
-	if err != nil {
-		h.logger.Errorf("Failed to marshal player disconnection message: %v", err)
-		return
-	}
-
-	// Broadcast to all clients in the game
-	h.BroadcastToGame(gameID, msgBytes)
-
-	// Update active players list
-	// Find a client in this game to use for broadcasting active players
-	h.clientsMutex.RLock()
-	if gamePlayers, ok := h.clients[gameID]; ok && len(gamePlayers) > 0 {
-		// Get any client from this game
+		// Find any client in this game to use for broadcasting the active players list.
+		// It doesn't matter which client, as handleGetActivePlayers broadcasts to everyone in the game.
+		h.clientsMutex.RLock()
 		var anyClient *Client
-		for _, client := range gamePlayers {
-			anyClient = client
-			break
+		if gameClients, ok := h.clients[gameID]; ok {
+			for _, c := range gameClients {
+				// Pick the first available client
+				anyClient = c
+				break
+			}
 		}
+		h.clientsMutex.RUnlock()
 
 		if anyClient != nil {
-			// Use this client to broadcast active players
-			go func() {
-				// Give a short delay to ensure the disconnection message is processed first
-				time.Sleep(100 * time.Millisecond)
-				anyClient.handleGetActivePlayers()
-			}()
+			h.logger.Infof("[Hub handlePlayerDisconnected] Using client %s to trigger active players broadcast for game %s", anyClient.playerID, gameID)
+			anyClient.handleGetActivePlayers()
+		} else {
+			h.logger.Warnf("[Hub handlePlayerDisconnected] No clients left in game %s to trigger active players broadcast.", gameID)
 		}
-	}
-	h.clientsMutex.RUnlock()
-}
-
-// CheckInactiveClients checks for inactive clients and unregisters them
-// This should be called periodically to clean up inactive connections
-func (h *Hub) CheckInactiveClients(inactivityThreshold time.Duration) {
-	h.clientsMutex.Lock()
-	defer h.clientsMutex.Unlock()
-
-	inactiveClients := []*Client{}
-
-	// Find all inactive clients
-	for gameID, gamePlayers := range h.clients {
-		for playerID, client := range gamePlayers {
-			// Use the passed inactivity threshold (which should be 90 seconds now)
-			if !client.isActive(inactivityThreshold) {
-				h.logger.Warnf("Detected inactive client: Game ID: %s, Player ID: %s, Session: %s",
-					gameID, playerID, client.sessionID)
-				inactiveClients = append(inactiveClients, client)
-			}
-		}
-	}
-
-	// Unregister inactive clients outside the loop to avoid modifying the map during iteration
-	for _, client := range inactiveClients {
-		// Use a goroutine to avoid blocking
-		go func(c *Client) {
-			h.logger.Warnf("Unregistering inactive client: Game ID: %s, Player ID: %s, Session: %s",
-				c.gameID, c.playerID, c.sessionID)
-			h.unregister <- c
-		}(client)
-	}
-
-	if len(inactiveClients) > 0 {
-		h.logger.Infof("Unregistered %d inactive clients", len(inactiveClients))
-	}
-}
-
-// updateGameInfoCache updates the cached game information for a specific game
-func (h *Hub) updateGameInfoCache(gameID string) {
-	if h.gameManager == nil {
-		h.logger.Warnf("Game manager is nil, cannot update game info cache for game %s", gameID)
-		return
-	}
-
-	// Skip lobby connections - they don't represent actual games
-	if gameID == "lobby" {
-		h.logger.Debugf("Skipping game info cache update for lobby connection")
-		return
-	}
-
-	// Get game from manager
-	game, err := h.gameManager.GetGame(gameID)
-	if err != nil {
-		h.logger.Warnf("Failed to get game %s from manager: %v", gameID, err)
-		return
-	}
-
-	// Update game info cache
-	gameInfo := h.getGameInfo(gameID)
-	if gameInfo == nil {
-		gameInfo = make(map[string]interface{})
-	}
-
-	// Update basic game information
-	gameInfo["gameId"] = gameID
-	gameInfo["status"] = string(game.Status)
-	gameInfo["currentTurn"] = game.CurrentTurn
-	gameInfo["turnOrder"] = game.TurnOrder
-	gameInfo["lastUpdated"] = time.Now().Format(time.RFC3339)
-
-	// Store updated game info
-	h.storeGameInfo(gameID, gameInfo)
-}
-
-// updateAllGameInfoCache updates the game info cache for all active games
-func (h *Hub) updateAllGameInfoCache() {
-	// Get list of active games
-	h.clientsMutex.RLock()
-	activeGames := make([]string, 0, len(h.clients))
-	for gameID := range h.clients {
-		activeGames = append(activeGames, gameID)
-	}
-	h.clientsMutex.RUnlock()
-
-	// Update cache for each active game
-	for _, gameID := range activeGames {
-		h.updateGameInfoCache(gameID)
-	}
-}
-
-// Run starts the WebSocket hub
-func (h *Hub) Run() {
-	// Create a ticker to periodically check for inactive clients
-	inactivityCheckTicker := time.NewTicker(30 * time.Second)
-	defer inactivityCheckTicker.Stop()
-
-	// Create a ticker to periodically update game info cache
-	gameInfoUpdateTicker := time.NewTicker(5 * time.Second)
-	defer gameInfoUpdateTicker.Stop()
-
-	for {
-		select {
-		case <-inactivityCheckTicker.C:
-			// Check for inactive clients every 30 seconds
-			// Consider a client inactive if no pong received for 90 seconds (increased from 45)
-			h.CheckInactiveClients(90 * time.Second)
-
-		case <-gameInfoUpdateTicker.C:
-			// Update game info cache for all active games
-			h.updateAllGameInfoCache()
-
-		case <-h.ctx.Done():
-			// Shutdown all clients
-			h.clientsMutex.Lock()
-			for gameID, gamePlayers := range h.clients {
-				for playerID, client := range gamePlayers {
-					// Close the WebSocket connection properly
-					client.conn.Close()
-					delete(h.clients[gameID], playerID)
-				}
-				delete(h.clients, gameID)
-			}
-			h.clientsMutex.Unlock()
-			return
-
-		case client := <-h.register:
-			h.clientsMutex.Lock()
-			if _, ok := h.clients[client.gameID]; !ok {
-				h.clients[client.gameID] = make(map[string]*Client) // Initialize player map for new game
-			}
-
-			// Check if this player is already registered (e.g., reconnect with same playerID)
-			if existingClient, ok := h.clients[client.gameID][client.playerID]; ok {
-				// If an old client exists, unregister it first to avoid duplicates
-				h.logger.Warnf("[Run REGISTER] Player %s already registered in game %s. Unregistering old client (Session: %s) before registering new one (Session: %s).", client.playerID, client.gameID, existingClient.sessionID, client.sessionID)
-				delete(h.clients[client.gameID], client.playerID)
-				// Close all the old client's channels
-				close(existingClient.highPriorityQueue)
-				close(existingClient.normalPriorityQueue)
-				close(existingClient.lowPriorityQueue)
-			}
-
-			// Register the new client
-			h.clients[client.gameID][client.playerID] = client
-			h.clientsMutex.Unlock() // Unlock before potentially long-running calls
-
-			// --- Fetch player details from GameManager and store in Hub's cache ---
-			go func(gID, pID string) { // Use goroutine to avoid blocking hub loop
-				gameData, err := h.gameManager.GetGame(gID)
-				if err != nil {
-					h.logger.Errorf("[Run REGISTER] Failed to get game data for %s when fetching player info for %s: %v", gID, pID, err)
-					return
-				}
-				var playerDetails map[string]interface{}
-				found := false
-				for _, p := range gameData.Players {
-					if p.ID == pID {
-						// Convert player struct to map[string]interface{} for storage
-						// (This assumes necessary fields are exported and tagged correctly for JSON/BSON,
-						// or we manually map fields)
-						playerDataBytes, _ := json.Marshal(p) // Use JSON marshal/unmarshal for simple conversion
-						if err := json.Unmarshal(playerDataBytes, &playerDetails); err == nil {
-							// Add/Ensure essential fields expected by handleGetActivePlayers if not present from struct
-							if _, ok := playerDetails["isReady"]; !ok {
-								playerDetails["isReady"] = false
-							} // Example default
-							h.storePlayerInfo(gID, pID, playerDetails)
-							found = true
-							break
-						} else {
-							h.logger.Errorf("[Run REGISTER] Failed to convert player struct to map for caching: %v", err)
-						}
-					}
-				}
-				if !found {
-					h.logger.Warnf("[Run REGISTER] Could not find player %s in game data for %s to update hub cache.", pID, gID)
-				}
-			}(client.gameID, client.playerID)
-			// --- End Player Info Caching ---
-
-			// Note: GameManager handles player connection tracking through other mechanisms
-			// Player connection is tracked through the WebSocket hub and game state
-
-			// Trigger sending the updated player list AFTER registration and caching attempt
-			// Send a message to the newly connected client's readPump to trigger handleGetActivePlayers
-			// This is a bit of a hack, ideally the client requests this after connection.
-			// Alternatively, we could directly call handleGetActivePlayers here IF it's safe
-			// to do so without deadlocking (needs careful review).
-			// For now, let's assume the client requests it or it happens periodically.
-
-			// Log current clients in the game for debugging
-			// Removed unused debug logging code
-
-		case client := <-h.unregister:
-			h.clientsMutex.Lock()
-			if gameClients, ok := h.clients[client.gameID]; ok {
-				if clientObj, ok := gameClients[client.playerID]; ok {
-					// Only process unregister if it's the same client instance (matching sessionID)
-					if clientObj.sessionID == client.sessionID {
-						// Safely close all client channels
-						func() {
-							defer func() {
-								if r := recover(); r != nil {
-									h.logger.Warnf("Recovered from panic while closing client channels during unregister: %v", r)
-								}
-							}()
-							// Close all priority queues
-							close(client.highPriorityQueue)
-							close(client.normalPriorityQueue)
-							close(client.lowPriorityQueue)
-						}()
-
-						delete(h.clients[client.gameID], client.playerID)
-
-						// If no more clients in this game, remove the game entry from the hub
-						if len(h.clients[client.gameID]) == 0 {
-							delete(h.clients, client.gameID)
-						}
-
-						h.handlePlayerDisconnected(client.gameID, client.playerID, client.sessionID)
-					} else {
-					}
-				}
-			}
-			h.clientsMutex.Unlock()
-
-		case message := <-h.broadcast:
-			h.clientsMutex.RLock()
-			if gamePlayers, ok := h.clients[message.gameID]; ok {
-				// h.logger.Infof("Broadcasting to %d clients in game %s", len(gamePlayers), message.gameID)
-
-				// Extract message type for logging if it's JSON
-				var msgType string = "unknown"
-				if len(message.data) > 2 && message.data[0] == '{' {
-					var msgData map[string]interface{}
-					if err := json.Unmarshal(message.data, &msgData); err == nil {
-						if t, ok := msgData["type"].(string); ok {
-							msgType = t
-							_ = msgType // Assign to blank identifier to avoid unused variable error
-						}
-					}
-				}
-
-				sentCount := 0
-				for playerID, client := range gamePlayers {
-					// Don't send to excluded player
-					if message.excludePlayerID != "" && playerID == message.excludePlayerID {
-						// h.logger.Infof("Skipping excluded player %s for message type %s", playerID, msgType)
-						continue
-					}
-
-					// Safely send message with priority
-					func() {
-						defer func() {
-							if r := recover(); r != nil {
-								h.logger.Warnf("Recovered from panic during broadcast to client: %v", r)
-								// If we panic during send, it likely means client channel is closed
-								// We'll clean up this client on the next iteration
-							}
-						}()
-
-						// Determine message priority based on message type
-						priority := PriorityNormal // Default priority
-
-						// Try to parse message to determine priority
-						if len(message.data) > 2 && message.data[0] == '{' {
-							var msgData map[string]interface{}
-							if err := json.Unmarshal(message.data, &msgData); err == nil {
-								if msgType, ok := msgData["type"].(string); ok {
-									switch msgType {
-									case "game_state", "player_turn", "dice_rolled", "game_started", "game_ended":
-										priority = PriorityHigh
-									case "chat_message", "player_typing":
-										priority = PriorityLow
-									}
-								}
-							}
-						}
-
-						// Send with appropriate priority
-						if h.SendToPlayerWithPriority(client.gameID, client.playerID, message.data, priority) {
-							sentCount++
-						}
-					}()
-				}
-
-			} else {
-				h.logger.Warnf("Attempted to broadcast to non-existent game: %s", message.gameID)
-				// Skip broadcasting if this is the lobby - lobby broadcasts are handled separately
-				if message.gameID == "lobby" {
-					h.logger.Debugf("Skipping lobby broadcast - lobby connections don't use game rooms")
-				}
-			}
-			h.clientsMutex.RUnlock()
-		}
-	}
+	}()
 }
 
 // BroadcastToGame sends a message to all clients in a game
-func (h *Hub) BroadcastToGame(gameID string, message []byte) {
+func (h *Hub) BroadcastToGame(gameID string, data []byte) {
 	h.broadcast <- &BroadcastMessage{
 		gameID: gameID,
-		data:   message,
+		data:   data,
 	}
 }
 
@@ -1463,7 +1170,6 @@ func (c *Client) handleMessage(message []byte) {
 	case "verify_host":
 		// Handle host verification
 		c.handleVerifyHost(msg)
-		break
 	case "game:start":
 		// Handle game start request
 		c.hub.logger.Infof("Game start request received from player %s for game %s", c.playerID, c.gameID)
@@ -1499,7 +1205,6 @@ func (c *Client) handleMessage(message []byte) {
 				c.hub.logger.Warnf("Game %s started but game info not found in cache", c.gameID)
 			}
 		}
-		break
 	case "player_joined":
 		// Sent by a client when they join the game
 		// Payload should include player details like name, token, etc.
@@ -1535,13 +1240,9 @@ func (c *Client) handleMessage(message []byte) {
 			c.handleGetActivePlayers() // This will get the full list and broadcast it
 
 		}
-		break
-
 	case "get_active_players":
 		// Handle request for active players list
 		c.handleGetActivePlayers()
-		break
-
 	case "roll_dice":
 		// Log the dice roll request
 		c.hub.logger.Infof("Dice roll request received from player %s in game %s", c.playerID, c.gameID)
@@ -1729,8 +1430,6 @@ func (c *Client) handleMessage(message []byte) {
 		// Broadcast the result to all players in the game
 		c.hub.BroadcastToGame(c.gameID, responseJSON)
 		c.hub.logger.Infof("Broadcasted dice roll result for player %s in game %s", c.playerID, c.gameID)
-		break
-
 	case "update_player_info", "update_player", "set_player_token":
 		// Extract player info from the message
 		playerId, ok := msg["playerId"].(string)
@@ -1840,8 +1539,6 @@ func (c *Client) handleMessage(message []byte) {
 			time.Sleep(100 * time.Millisecond)
 			c.handleGetActivePlayers()
 		}()
-		break
-
 	case "player_ready":
 		// Extract player info from the message
 		playerId, ok := msg["playerId"].(string)
@@ -1940,8 +1637,6 @@ func (c *Client) handleMessage(message []byte) {
 			c.hub.logger.Infof("[PLAYER_READY] Sending active_players update after player_ready change for player %s", playerId)
 			c.handleGetActivePlayers()
 		}()
-		break
-
 	case "get_game_state":
 		// Handle request for current game state
 		// c.hub.logger.Infof("Game state request received from player %s for game %s", c.playerID, c.gameID)
@@ -1984,9 +1679,6 @@ func (c *Client) handleMessage(message []byte) {
 
 		// Send only to the requesting client
 		c.hub.SendToPlayerWithPriority(c.gameID, c.playerID, responseJSON, PriorityNormal)
-		// c.hub.logger.Infof("Sent game state to player %s in game %s", c.playerID, c.gameID)
-		break
-
 	case "set_host":
 		// Extract host ID from the message
 		hostID, ok := msg["hostId"].(string)
@@ -2028,8 +1720,6 @@ func (c *Client) handleMessage(message []byte) {
 
 		// Also broadcast the updated list of active players to all clients
 		c.handleGetActivePlayers()
-		break
-
 	case "leave_game":
 		// Handle explicit leave game request
 		c.hub.logger.Infof("Player %s explicitly leaving game %s", c.playerID, c.gameID)
@@ -2058,7 +1748,6 @@ func (c *Client) handleMessage(message []byte) {
 				c.conn.Close()
 			}
 		}()
-		break
 	}
 }
 

@@ -725,1093 +725,127 @@ func (gm *GameManager) StartGame(gameID string, requestingPlayerID string) error
 	return nil
 }
 
-// PlayerDisconnected handles a player disconnection
-// This is called by the hub when a websocket connection is closed
-func (gm *GameManager) PlayerDisconnected(gameID, sessionID string) { // Reverted signature to use sessionID
-	gm.logger.Debugf("[PlayerDisconnected] Called for game %s, session %s", gameID, sessionID)
-	now := time.Now()
+// PlayerDisconnected handles a player disconnecting from a game.
+// It returns the new host ID if the host disconnected, and an error if something went wrong.
+func (gm *GameManager) PlayerDisconnected(gameID, playerID string) (string, error) {
+	gm.activeGamesMutex.RLock()
+	session, exists := gm.activeGames[gameID]
+	gm.activeGamesMutex.RUnlock()
 
-	gm.activeGamesMutex.RLock() // Use RLock first
-	session, ok := gm.activeGames[gameID]
-	gm.activeGamesMutex.RUnlock() // Release RLock
-
-	if !ok {
-		gm.logger.Warnf("[PlayerDisconnected] Game session %s not found for disconnected session %s", gameID, sessionID)
-		// Optionally try loading from DB, but if session isn't in memory, it's unlikely useful here.
-		return
+	if !exists {
+		return "", fmt.Errorf("game session not found for gameID: %s", gameID)
 	}
 
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	gm.logger.Debugf("[PlayerDisconnected] Acquired lock for game %s session", gameID)
 
-	// Find the player ID associated with the disconnected sessionID
-	connection, exists := session.PlayerConnections[sessionID]
-	if !exists {
-		gm.logger.Warnf("[PlayerDisconnected] Connection info for session %s not found in game %s", sessionID, gameID)
-		return // Cannot proceed without knowing which player disconnected
-	}
-	playerID := connection.PlayerID
-	gm.logger.Debugf("[PlayerDisconnected] Session %s corresponds to player %s in game %s", sessionID, playerID, gameID)
-
-	// Mark the specific connection as inactive
-	connection.IsConnected = false
-	connection.DisconnectedAt = &now
-	session.PlayerConnections[sessionID] = connection // Update the connection status in the map
-	// Note: We don't delete the entry from PlayerConnections immediately,
-	// allowing potential reconnection logic to use DisconnectedAt.
-	// We *do* remove the playerID -> sessionID mapping IF this was the last active connection for the player
-	// (More complex reconnection logic might handle multiple sessions per player differently)
-	delete(session.ConnectedPlayers, playerID) // Remove mapping for this player
-	gm.logger.Debugf("[PlayerDisconnected] Removed player %s (Session: %s) from ConnectedPlayers map for game %s", playerID, sessionID, gameID)
-
-	// Find the player in the game's player list
-	playerFound := false
-	isHost := false
-	activePlayersRemaining := 0
-
-	for i := range session.Game.Players {
-		// Count active players first (before potentially changing the status of the disconnected player)
-		if session.Game.Players[i].Status == models.PlayerStatusActive && session.Game.Players[i].ID != playerID {
-			activePlayersRemaining++
-		}
-
-		if session.Game.Players[i].ID == playerID {
-			gm.logger.Debugf("[PlayerDisconnected] Found player %s in game %s players list. Current status: %s", playerID, gameID, session.Game.Players[i].Status)
-			playerFound = true
-			// Check if the disconnecting player was the host
-			if session.Game.HostID == playerID {
-				isHost = true
-				gm.logger.Debugf("[PlayerDisconnected] Player %s was the host of game %s", playerID, gameID)
-			}
-			// Update player status in the game data
-			if session.Game.Players[i].Status == models.PlayerStatusActive {
-				session.Game.Players[i].Status = models.PlayerStatusDisconnected // Use DISCONNECTED status
-				session.Game.Players[i].DisconnectedAt = &now                    // Set DisconnectedAt timestamp
-				gm.logger.Debugf("[PlayerDisconnected] Updated player %s status to %s in game %s game data", playerID, models.PlayerStatusDisconnected, gameID)
-			} else {
-				gm.logger.Debugf("[PlayerDisconnected] Player %s game status was already %s, not changing", playerID, session.Game.Players[i].Status)
-			}
-			// Don't break; continue loop to ensure activePlayersRemaining count is accurate
+	// Find the player and remove them
+	playerIndex := -1
+	for i, p := range session.Game.Players {
+		if p.ID == playerID {
+			playerIndex = i
+			break
 		}
 	}
 
-	if !playerFound {
-		gm.logger.Warnf("[PlayerDisconnected] Player %s (from session %s) not found in game session %s player list after all", playerID, sessionID, gameID)
-		return // Exit if player somehow not found in the list
+	if playerIndex == -1 {
+		// Player not found in the game, maybe already removed.
+		// This can happen in race conditions, so we don't return an error.
+		gm.logger.Warnf("PlayerDisconnected: Player %s not found in game %s. Might have been already removed.", playerID, gameID)
+		return "", nil // Return current host and no error
 	}
-	gm.logger.Debugf("[PlayerDisconnected] Active players remaining in game %s (excluding %s): %d", gameID, playerID, activePlayersRemaining)
 
-	// Update the main game LastActivity timestamp
-	session.Game.LastActivity = now
+	// Remove player from the Players slice
+	session.Game.Players = append(session.Game.Players[:playerIndex], session.Game.Players[playerIndex+1:]...)
+
+	// Remove player from the TurnOrder slice
+	turnOrderIndex := -1
+	for i, id := range session.Game.TurnOrder {
+		if id == playerID {
+			turnOrderIndex = i
+			break
+		}
+	}
+	if turnOrderIndex != -1 {
+		session.Game.TurnOrder = append(session.Game.TurnOrder[:turnOrderIndex], session.Game.TurnOrder[turnOrderIndex+1:]...)
+	}
 
 	newHostID := ""
-	previousHostID := session.Game.HostID // Store the current host ID before potential change
-
-	// Handle host disconnection
-	if isHost {
-		gm.logger.Debugf("[PlayerDisconnected] Host %s disconnected from game %s. Looking for a new host.", playerID, gameID)
-		if activePlayersRemaining > 0 {
-			// Find a new host among remaining active players who are still connected
-			for _, p := range session.Game.Players {
-				if p.Status == models.PlayerStatusActive { // Ensure they are marked active in game state
-					// Check if this player has an active connection
-					if sid, connected := session.ConnectedPlayers[p.ID]; connected {
-						if conn, exists := session.PlayerConnections[sid]; exists && conn.IsConnected {
-							newHostID = p.ID
-							gm.logger.Debugf("[PlayerDisconnected] Found new host candidate %s (status: %s, connected: true) for game %s", p.ID, p.Status, gameID)
-							break
-						}
-					}
-					gm.logger.Debugf("[PlayerDisconnected] Player %s is active but not currently connected via WebSocket, cannot be host.", p.ID)
-				}
-			}
-
-			if newHostID != "" {
-				gm.logger.Infof("[PlayerDisconnected] Transferring host from %s to %s in game %s", playerID, newHostID, gameID)
-				session.Game.HostID = newHostID
+	// If the disconnected player was the host, assign a new host.
+	if session.Game.HostID == playerID {
+		if len(session.Game.Players) > 0 {
+			// Assign the next player in the original turn order as the new host.
+			// If the host was the last in turn order, assign the first player.
+			if turnOrderIndex != -1 && turnOrderIndex < len(session.Game.TurnOrder) {
+				newHostID = session.Game.TurnOrder[turnOrderIndex]
+			} else if len(session.Game.TurnOrder) > 0 {
+				newHostID = session.Game.TurnOrder[0]
 			} else {
-				gm.logger.Warnf("[PlayerDisconnected] No suitable connected player found to transfer host to in game %s.", gameID)
-				// Mark game as ABANDONED if host leaves and no other active+connected player is found
-				gm.logger.Infof("[PlayerDisconnected] Host disconnected and no suitable new host. Marking game %s as ABANDONED.", gameID)
-				session.Game.Status = models.GameStatusAbandoned
+				// Fallback to the first player in the remaining player list
+				newHostID = session.Game.Players[0].ID
 			}
+			session.Game.HostID = newHostID
+			gm.logger.Infof("Host %s disconnected from game %s. New host is %s.", playerID, gameID, newHostID)
 		} else {
-			gm.logger.Infof("[PlayerDisconnected] Host %s disconnected and no active players remain in game %s. Marking game as ABANDONED.", playerID, gameID)
-			session.Game.Status = models.GameStatusAbandoned
+			// No players left, mark game for cleanup
+			session.Game.HostID = ""
+			gm.logger.Infof("Last player (host) %s disconnected from game %s. Game will be marked as completed.", playerID, gameID)
+			session.Game.Status = models.GameStatusCompleted
 		}
 	}
 
-	// Update game in database
-	objID, err := primitive.ObjectIDFromHex(gameID)
-	if err != nil {
-		gm.logger.Errorf("[PlayerDisconnected] Invalid game ID format %s: %v", gameID, err)
-		return
-	}
-
-	updateFields := bson.M{
-		"players":      session.Game.Players, // Includes player with updated status and DisconnectedAt
-		"updatedAt":    now,
-		"lastActivity": session.Game.LastActivity, // Use the updated LastActivity timestamp
-	}
-	// Update hostId field only if it actually changed or game became abandoned due to host leaving
-	if newHostID != "" || (isHost && session.Game.Status == models.GameStatusAbandoned) {
-		updateFields["hostId"] = session.Game.HostID
-		gm.logger.Debugf("[PlayerDisconnected] Preparing to update hostId to '%s' in DB for game %s", session.Game.HostID, gameID)
-	}
-	// Update status field only if it changed (i.e., became ABANDONED)
-	if session.Game.Status == models.GameStatusAbandoned {
-		updateFields["status"] = session.Game.Status
-		gm.logger.Debugf("[PlayerDisconnected] Preparing to update status to '%s' in DB for game %s", session.Game.Status, gameID)
-
-		// Schedule cleanup of the abandoned game after a brief delay
-		go func() {
-			time.Sleep(2 * time.Second) // Give time for final messages to be sent
-			gm.logger.Infof("[PlayerDisconnected] Starting cleanup of abandoned game %s", gameID)
-			if err := gm.CleanupAbandonedGame(gameID, true); err != nil {
-				gm.logger.Errorf("[PlayerDisconnected] Failed to cleanup abandoned game %s: %v", gameID, err)
-			}
-		}()
-	}
-
-	gm.logger.Debugf("[PlayerDisconnected] Attempting to update game %s in MongoDB with fields: %+v", gameID, updateFields)
+	// Update the game in the database
 	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-	_, err = collection.UpdateOne(
-		gm.ctx,
-		bson.M{"_id": objID},
-		bson.M{"$set": updateFields},
-	)
+	filter := bson.M{"_id": session.Game.ID}
+	update := bson.M{"$set": bson.M{
+		"players":   session.Game.Players,
+		"turnOrder": session.Game.TurnOrder,
+		"hostId":    session.Game.HostID,
+		"status":    session.Game.Status,
+		"updatedAt": time.Now(),
+	}}
+
+	_, err := collection.UpdateOne(gm.ctx, filter, update)
 	if err != nil {
-		gm.logger.Errorf("[PlayerDisconnected] Failed to update game %s in database: %v", gameID, err)
-		// Continue even if DB update fails, to broadcast state
-	}
-	gm.logger.Debugf("[PlayerDisconnected] Successfully updated game %s in MongoDB.", gameID)
-
-	// Broadcast updated player list and potential host change to remaining clients in the game
-	// Prepare the message payload
-	broadcastPlayers := make([]models.Player, 0)
-	for _, p := range session.Game.Players {
-		// Include players who are active or the one who just disconnected (now marked as DISCONNECTED)
-		if p.Status == models.PlayerStatusActive || p.ID == playerID {
-			broadcastPlayers = append(broadcastPlayers, p)
-		}
+		gm.logger.Errorf("Failed to update game %s after player %s disconnected: %v", gameID, playerID, err)
+		return "", fmt.Errorf("failed to update game state: %w", err)
 	}
 
-	updateMsg := map[string]interface{}{
-		"type":         "active_players", // Keep type as active_players, frontend handles status
-		"gameId":       gameID,
-		"players":      broadcastPlayers,    // Send updated list including the player with DISCONNECTED status
-		"hostId":       session.Game.HostID, // Send current host ID
-		"previousHost": previousHostID,      // Indicate previous host if changed
-		"leftPlayerId": playerID,            // Explicitly state who left
-		"gameStatus":   session.Game.Status, // Send the current game status (might be ABANDONED)
+	gm.logger.Infof("Player %s successfully removed from game %s.", playerID, gameID)
+
+	// If the game is now empty, remove it from active games
+	if len(session.Game.Players) == 0 {
+		gm.activeGamesMutex.Lock()
+		delete(gm.activeGames, gameID)
+		gm.activeGamesMutex.Unlock()
+		gm.logger.Infof("Game %s is now empty and has been removed from active sessions.", gameID)
 	}
 
-	msgBytes, _ := json.Marshal(updateMsg)
-	gm.logger.Debugf("[PlayerDisconnected] Broadcasting player update to game %s: %s", gameID, string(msgBytes))
-	if gm.wsHub != nil {
-		gm.wsHub.BroadcastToGame(gameID, msgBytes)
-	} else {
-		gm.logger.Warnf("[PlayerDisconnected] wsHub is nil, cannot broadcast player update for game %s", gameID)
-	}
-
-	// Removed broadcastLobbyUpdate calls - rely on frontend polling for now
-
-	gm.logger.Debugf("[PlayerDisconnected] Finished processing disconnection for player %s (Session: %s) in game %s", playerID, sessionID, gameID)
-
-	// Optionally start a timeout goroutine for forfeiture if player doesn't reconnect
-	// go gm.handleDisconnectionTimeout(gameID, playerID, sessionID) // Disabled for now
+	return newHostID, nil
 }
 
-// handleDisconnectionTimeout handles the timeout for disconnected players
-func (gm *GameManager) handleDisconnectionTimeout(gameID, playerID, sessionID string) {
-	// Wait for 45 seconds (grace period for reconnection)
-	time.Sleep(45 * time.Second)
-
-	// Check if player is still disconnected
-	gm.activeGamesMutex.RLock()
-	session, exists := gm.activeGames[gameID]
-	gm.activeGamesMutex.RUnlock()
-
-	if !exists {
-		gm.logger.Warnf("Timeout for non-existent game: %s", gameID)
-		return
-	}
-
-	session.mutex.Lock()
-	defer session.mutex.Unlock()
-
-	connection, exists := session.PlayerConnections[sessionID]
-	if !exists || connection.PlayerID != playerID || connection.IsConnected {
-		// Session no longer exists, or player has reconnected
-		return
-	}
-
-	// Player is still disconnected, mark as forfeited
-	playerIndex := -1
-	for i, player := range session.Game.Players {
-		if player.ID == playerID {
-			playerIndex = i
-			break
-		}
-	}
-
-	if playerIndex != -1 {
-		// Update player status
-		player := session.Game.Players[playerIndex]
-		player.Status = models.PlayerStatusForfeited
-		session.Game.Players[playerIndex] = player
-
-		// Handle player forfeiture (redistribute assets, etc.)
-		gm.handlePlayerForfeiture(session.Game, playerID)
-
-		// Update game in database
-		objID, err := primitive.ObjectIDFromHex(gameID)
-		if err != nil {
-			gm.logger.Errorf("Invalid game ID: %v", err)
-			return
-		}
-
-		collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-		_, err = collection.UpdateOne(
-			gm.ctx,
-			bson.M{"_id": objID},
-			bson.M{
-				"$set": bson.M{
-					"players":      session.Game.Players,
-					"turnOrder":    session.Game.TurnOrder, // In case turn order changed
-					"updatedAt":    time.Now(),
-					"lastActivity": time.Now(),
-				},
-			},
-		)
-
-		if err != nil {
-			gm.logger.Errorf("Failed to update game for forfeiture: %v", err)
-		}
-
-		gm.logger.Infof("Player %s forfeited game %s due to disconnection timeout", playerID, gameID)
-	}
-}
-
-// handlePlayerForfeiture handles the forfeiture of a player
-func (gm *GameManager) handlePlayerForfeiture(game *models.Game, playerID string) {
-	// Find player's properties
-	var playerProps []string
-	for _, player := range game.Players {
-		if player.ID == playerID {
-			playerProps = player.Properties
-			break
-		}
-	}
-
-	// Reset properties to unowned
-	for i, prop := range game.BoardState.Properties {
-		for _, playerProp := range playerProps {
-			if prop.ID == playerProp {
-				prop.OwnerID = ""
-				game.BoardState.Properties[i] = prop
-			}
-		}
-	}
-
-	// Remove player from turn order if they're in it
-	newTurnOrder := make([]string, 0, len(game.TurnOrder))
-	for _, id := range game.TurnOrder {
-		if id != playerID {
-			newTurnOrder = append(newTurnOrder, id)
-		}
-	}
-	game.TurnOrder = newTurnOrder
-
-	// If it was this player's turn, move to next player
-	if game.CurrentTurn == playerID && len(newTurnOrder) > 0 {
-		// Find the next player in turn order
-		nextIndex := 0
-		for i, id := range game.TurnOrder {
-			if id == playerID {
-				nextIndex = (i + 1) % len(game.TurnOrder)
-				break
-			}
-		}
-		game.CurrentTurn = game.TurnOrder[nextIndex]
-	}
-
-	// Check if game should end (e.g., only one player left)
-	if len(newTurnOrder) <= 1 {
-		// Set the last player as winner
-		if len(newTurnOrder) == 1 {
-			game.WinnerID = newTurnOrder[0]
-		}
-		game.Status = models.GameStatusCompleted
-	}
-}
-
-// PlayerReconnected handles a player reconnection
-func (gm *GameManager) PlayerReconnected(gameID, playerID, sessionID string) error {
-	gm.activeGamesMutex.RLock()
-	session, exists := gm.activeGames[gameID]
-	gm.activeGamesMutex.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("game session not found")
-	}
-
-	session.mutex.Lock()
-	defer session.mutex.Unlock()
-
-	// Check if player is in the game
-	playerIndex := -1
-	for i, player := range session.Game.Players {
-		if player.ID == playerID {
-			playerIndex = i
-			break
-		}
-	}
-
-	if playerIndex == -1 {
-		return fmt.Errorf("player not found in game")
-	}
-
-	// Check if player status is DISCONNECTED
-	if session.Game.Players[playerIndex].Status != models.PlayerStatusDisconnected {
-		return fmt.Errorf("player is not in DISCONNECTED status")
-	}
-
-	// Update player status
-	player := session.Game.Players[playerIndex]
-	player.Status = models.PlayerStatusActive
-	player.DisconnectedAt = nil
-	session.Game.Players[playerIndex] = player
-
-	// Create new player connection
-	newSessionID := uuid.New().String()
-	session.ConnectedPlayers[playerID] = newSessionID
-	session.PlayerConnections[newSessionID] = PlayerConnection{
-		PlayerID:    playerID,
-		SessionID:   newSessionID,
-		IsConnected: true,
-	}
-
-	// Update game in database
-	objID, err := primitive.ObjectIDFromHex(gameID)
-	if err != nil {
-		return fmt.Errorf("invalid game ID: %w", err)
-	}
-
-	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-	_, err = collection.UpdateOne(
-		gm.ctx,
-		bson.M{"_id": objID},
-		bson.M{
-			"$set": bson.M{
-				"players":      session.Game.Players,
-				"updatedAt":    time.Now(),
-				"lastActivity": time.Now(),
-			},
-		},
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to update game: %w", err)
-	}
-
-	gm.logger.Infof("Player %s reconnected to game %s", playerID, gameID)
-
-	return nil
-}
-
-// ProcessGameAction processes a game action
-func (gm *GameManager) ProcessGameAction(action models.GameAction) error {
-	gameID := action.GameID
-	playerID := action.PlayerID
+// GetActivePlayers retrieves the list of active players for a game
+func (gm *GameManager) GetActivePlayers(gameID string) ([]models.Player, error) {
+	var players []models.Player
 
 	gm.activeGamesMutex.RLock()
 	session, exists := gm.activeGames[gameID]
 	gm.activeGamesMutex.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("game session not found")
+		return players, fmt.Errorf("game session not found")
 	}
 
-	session.mutex.Lock()
-	defer session.mutex.Unlock()
+	session.mutex.RLock()
+	defer session.mutex.RUnlock()
 
-	// Validate game status
-	if session.Game.Status != models.GameStatusActive {
-		return fmt.Errorf("game is not active")
-	}
-
-	// Check if it's player's turn (except for certain actions)
-	if session.Game.CurrentTurn != playerID && !isNonTurnAction(action.Type) {
-		return fmt.Errorf("not player's turn")
-	}
-
-	// Find player in game
-	playerIndex := -1
-	for i, player := range session.Game.Players {
-		if player.ID == playerID {
-			playerIndex = i
-			break
+	for _, player := range session.Game.Players {
+		if player.Status == models.PlayerStatusActive {
+			players = append(players, player)
 		}
 	}
 
-	if playerIndex == -1 {
-		return fmt.Errorf("player not found in game")
-	}
-
-	// Check if player is active
-	if session.Game.Players[playerIndex].Status != models.PlayerStatusActive {
-		return fmt.Errorf("player is not active")
-	}
-
-	// Process action based on type
-	switch action.Type {
-	case models.ActionTypeRollDice:
-		return gm.processRollDiceAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeBuyProperty:
-		return gm.processBuyPropertyAction(session.Game, playerID, action.Payload)
-	case models.ActionTypePayRent:
-		return gm.processPayRentAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeDrawCard:
-		return gm.processDrawCardAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeUseCard:
-		return gm.processUseCardAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeMortgageProperty:
-		return gm.processMortgagePropertyAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeUnmortgageProperty:
-		return gm.processUnmortgagePropertyAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeBuildEngagement:
-		return gm.processBuildEngagementAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeBuildCheckmark:
-		return gm.processBuildCheckmarkAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeEndTurn:
-		return gm.processEndTurnAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeTrade:
-		return gm.processTradeAction(session.Game, playerID, action.Payload)
-	case models.ActionTypeSpecial:
-		return gm.processSpecialAction(session.Game, playerID, action.Payload)
-	default:
-		return fmt.Errorf("unknown action type: %s", action.Type)
-	}
-}
-
-// Helper function to check if an action can be performed outside of player's turn
-func isNonTurnAction(actionType models.ActionType) bool {
-	switch actionType {
-	case models.ActionTypeTrade:
-		return true
-	default:
-		return false
-	}
-}
-
-// Placeholder for action processing methods
-func (gm *GameManager) processRollDiceAction(game *models.Game, playerID string, payload interface{}) error {
-	gm.logger.Infof("Player %s rolling dice in game %s", playerID, game.ID.Hex())
-
-	// Generate random dice values (1-6 for each die)
-	dice1 := 1 + (time.Now().UnixNano() % 6)
-	time.Sleep(1 * time.Millisecond)
-	dice2 := 1 + (time.Now().UnixNano() % 6)
-	totalMove := int(dice1 + dice2)
-
-	// Find the player
-	playerIndex := -1
-	for i, player := range game.Players {
-		if player.ID == playerID {
-			playerIndex = i
-			break
-		}
-	}
-	if playerIndex == -1 {
-		return fmt.Errorf("player not found in game")
-	}
-	player := &game.Players[playerIndex]
-
-	// Jail logic
-	if player.InJail {
-		if dice1 == dice2 {
-			// Rolled doubles, get out of jail
-			player.InJail = false
-			player.JailTurns = 0
-			gm.logger.Infof("Player %s rolled doubles and is released from jail!", playerID)
-			// Move forward by dice roll from jail (position 25)
-			player.Position = (25 + totalMove) % 40
-			// Broadcast release notification
-			if gm.wsHub != nil {
-				msg := map[string]interface{}{
-					"type":     "jail_event",
-					"playerId": playerID,
-					"event":    "released",
-					"dice":     []int{int(dice1), int(dice2)},
-				}
-				if msgBytes, err := json.Marshal(msg); err == nil {
-					gm.wsHub.BroadcastToGame(game.ID.Hex(), msgBytes)
-				}
-			}
-			gm.logger.Infof("Player %s moved from jail (25) to %d", playerID, player.Position)
-		} else {
-			// Not doubles, decrement jail turns
-			player.JailTurns--
-			if player.JailTurns <= 0 {
-				player.InJail = false
-				player.JailTurns = 0
-				// Release and move forward
-				player.Position = (25 + totalMove) % 40
-				gm.logger.Infof("Player %s served jail time and is released, moved from jail (25) to %d", playerID, player.Position)
-				if gm.wsHub != nil {
-					msg := map[string]interface{}{
-						"type":     "jail_event",
-						"playerId": playerID,
-						"event":    "released_time",
-						"dice":     []int{int(dice1), int(dice2)},
-					}
-					if msgBytes, err := json.Marshal(msg); err == nil {
-						gm.wsHub.BroadcastToGame(game.ID.Hex(), msgBytes)
-					}
-				}
-			} else {
-				// Still in jail, do not move
-				gm.logger.Infof("Player %s is still in jail, %d turns left", playerID, player.JailTurns)
-				if gm.wsHub != nil {
-					msg := map[string]interface{}{
-						"type":      "jail_event",
-						"playerId":  playerID,
-						"event":     "stay",
-						"jailTurns": player.JailTurns,
-						"dice":      []int{int(dice1), int(dice2)},
-					}
-					if msgBytes, err := json.Marshal(msg); err == nil {
-						gm.wsHub.BroadcastToGame(game.ID.Hex(), msgBytes)
-					}
-				}
-			}
-		}
-	} else {
-		// Not in jail, normal move
-		oldPosition := player.Position
-		newPosition := (oldPosition + totalMove) % 40
-		// Check for 'Go to Jail' (position 30)
-		if newPosition == 30 {
-			player.Position = 25 // Jail position
-			player.InJail = true
-			player.JailTurns = 3
-			gm.logger.Infof("Player %s landed on Go to Jail! Sent to jail (25) for 3 turns.", playerID)
-			if gm.wsHub != nil {
-				msg := map[string]interface{}{
-					"type":      "jail_event",
-					"playerId":  playerID,
-					"event":     "jailed",
-					"jailTurns": 3,
-				}
-				if msgBytes, err := json.Marshal(msg); err == nil {
-					gm.wsHub.BroadcastToGame(game.ID.Hex(), msgBytes)
-				}
-			}
-		} else {
-			// Normal move
-			player.Position = newPosition
-		}
-	}
-
-	// Update the lastActivity time
-	game.LastActivity = time.Now()
-	game.UpdatedAt = time.Now()
-
-	// Update game in database
-	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-	_, err := collection.UpdateOne(
-		gm.ctx,
-		bson.M{"_id": game.ID},
-		bson.M{
-			"$set": bson.M{
-				"players":      game.Players,
-				"updatedAt":    game.UpdatedAt,
-				"lastActivity": game.LastActivity,
-			},
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to update game after rolling dice: %w", err)
-	}
-
-	gm.logger.Infof("Player %s rolled %d and %d, now at position %d", playerID, dice1, dice2, player.Position)
-
-	// Store the dice values in Redis for the WebSocket hub to use
-	if gm.redisClient != nil {
-		diceKey := fmt.Sprintf("game:%s:player:%s:lastdice", game.ID.Hex(), playerID)
-		diceValues := fmt.Sprintf("%d,%d", dice1, dice2)
-
-		// Set the dice values with a short expiration (30 seconds should be enough)
-		err := gm.redisClient.Set(gm.ctx, diceKey, diceValues, 30*time.Second).Err()
-		if err != nil {
-			gm.logger.Warnf("Failed to store dice values in Redis: %v", err)
-		} else {
-			gm.logger.Infof("Stored dice values in Redis for player %s: %s", playerID, diceValues)
-		}
-	}
-
-	// --- TURN MANAGEMENT AND BROADCAST ---
-	if gm.wsHub != nil {
-		rolledDoubles := dice1 == dice2
-		var nextPlayerID string
-		if player.InJail {
-			nextPlayerID = playerID // Still in jail, same player's turn
-		} else if rolledDoubles {
-			nextPlayerID = playerID // Player gets another turn
-		} else {
-			// Find next player in turn order
-			nextIndex := 0
-			for i, id := range game.TurnOrder {
-				if id == playerID {
-					nextIndex = (i + 1) % len(game.TurnOrder)
-					break
-				}
-			}
-			game.CurrentTurn = game.TurnOrder[nextIndex]
-			nextPlayerID = game.CurrentTurn
-			// Also update DB for currentTurn
-			collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-			_, _ = collection.UpdateOne(
-				gm.ctx,
-				bson.M{"_id": game.ID},
-				bson.M{"$set": bson.M{"currentTurn": game.CurrentTurn, "updatedAt": time.Now()}},
-			)
-		}
-		// Find the next player (or current if doubles) for name
-		var playerName string = "Player_" + nextPlayerID[:4]
-		for _, p := range game.Players {
-			if p.ID == nextPlayerID {
-				playerName = "Player_" + p.ID[:4]
-				break
-			}
-		}
-		turnMsg := map[string]interface{}{
-			"type":          "turn_changed",
-			"currentTurn":   nextPlayerID,
-			"playerName":    playerName,
-			"rolledDoubles": rolledDoubles,
-		}
-		if msgBytes, err := json.Marshal(turnMsg); err == nil {
-			gm.wsHub.BroadcastToGame(game.ID.Hex(), msgBytes)
-		}
-	}
-	// --- END TURN MANAGEMENT ---
-
-	return nil
-}
-
-func (gm *GameManager) processBuyPropertyAction(game *models.Game, playerID string, payload interface{}) error {
-	gm.logger.Infof("Player %s attempting to buy property in game %s", playerID, game.ID.Hex())
-
-	// Extract property ID from payload
-	payloadMap, ok := payload.(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("invalid payload format")
-	}
-
-	propertyIDRaw, exists := payloadMap["propertyId"]
-	if !exists {
-		return fmt.Errorf("property ID not provided in payload")
-	}
-
-	propertyID, ok := propertyIDRaw.(string)
-	if !ok {
-		return fmt.Errorf("property ID must be a string")
-	}
-
-	// Find the player
-	playerIndex := -1
-	for i, player := range game.Players {
-		if player.ID == playerID {
-			playerIndex = i
-			break
-		}
-	}
-
-	if playerIndex == -1 {
-		return fmt.Errorf("player not found in game")
-	}
-
-	player := &game.Players[playerIndex]
-
-	// Find the property
-	propertyIndex := -1
-	for i, prop := range game.BoardState.Properties {
-		if prop.ID == propertyID {
-			propertyIndex = i
-			break
-		}
-	}
-
-	if propertyIndex == -1 {
-		return fmt.Errorf("property not found in game")
-	}
-
-	property := &game.BoardState.Properties[propertyIndex]
-
-	// Check if property is already owned
-	if property.OwnerID != "" {
-		return fmt.Errorf("property is already owned by player %s", property.OwnerID)
-	}
-
-	// Check if player has enough money
-	if player.Balance < property.Price {
-		return fmt.Errorf("insufficient funds to purchase property")
-	}
-
-	// Check if player position matches property position
-	if player.Position != property.Position {
-		return fmt.Errorf("player not on the property's position")
-	}
-
-	// Purchase the property
-	player.Balance -= property.Price
-	property.OwnerID = player.ID
-	player.Properties = append(player.Properties, property.ID)
-
-	// Update player net worth
-	player.NetWorth = player.Balance // In a real implementation, this would include property values
-
-	// Update the lastActivity time
-	game.LastActivity = time.Now()
-	game.UpdatedAt = time.Now()
-
-	// Create a transaction record
-	// In a real implementation, this would be stored in the database
-
-	// Update game in database
-	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-	_, err := collection.UpdateOne(
-		gm.ctx,
-		bson.M{"_id": game.ID},
-		bson.M{
-			"$set": bson.M{
-				"players":      game.Players,
-				"boardState":   game.BoardState,
-				"updatedAt":    game.UpdatedAt,
-				"lastActivity": game.LastActivity,
-			},
-		},
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to update game after buying property: %w", err)
-	}
-
-	gm.logger.Infof("Player %s successfully purchased property %s for $%d",
-		playerID, property.Name, property.Price)
-
-	return nil
-}
-
-func (gm *GameManager) processPayRentAction(game *models.Game, playerID string, payload interface{}) error {
-	gm.logger.Infof("Player %s paying rent in game %s", playerID, game.ID.Hex())
-
-	// Extract property ID from payload
-	payloadMap, ok := payload.(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("invalid payload format")
-	}
-
-	propertyIDRaw, exists := payloadMap["propertyId"]
-	if !exists {
-		return fmt.Errorf("property ID not provided in payload")
-	}
-
-	propertyID, ok := propertyIDRaw.(string)
-	if !ok {
-		return fmt.Errorf("property ID must be a string")
-	}
-
-	// Find the player (payer)
-	payerIndex := -1
-	for i, player := range game.Players {
-		if player.ID == playerID {
-			payerIndex = i
-			break
-		}
-	}
-
-	if payerIndex == -1 {
-		return fmt.Errorf("payer not found in game")
-	}
-
-	payer := &game.Players[payerIndex]
-
-	// Find the property
-	propertyIndex := -1
-	for i, prop := range game.BoardState.Properties {
-		if prop.ID == propertyID {
-			propertyIndex = i
-			break
-		}
-	}
-
-	if propertyIndex == -1 {
-		return fmt.Errorf("property not found in game")
-	}
-
-	property := &game.BoardState.Properties[propertyIndex]
-
-	// Check if property is owned by someone else
-	if property.OwnerID == "" {
-		return fmt.Errorf("property is not owned by anyone")
-	}
-
-	if property.OwnerID == playerID {
-		return fmt.Errorf("player cannot pay rent to themselves")
-	}
-
-	// Find the owner (payee)
-	payeeIndex := -1
-	for i, player := range game.Players {
-		if player.ID == property.OwnerID {
-			payeeIndex = i
-			break
-		}
-	}
-
-	if payeeIndex == -1 {
-		return fmt.Errorf("property owner not found in game")
-	}
-
-	payee := &game.Players[payeeIndex]
-
-	// Calculate rent amount
-	rentAmount := property.RentCurrent
-	if rentAmount == 0 {
-		rentAmount = property.RentBase
-	}
-
-	// Apply market conditions
-	switch game.MarketCondition {
-	case models.MarketConditionBull:
-		rentAmount = int(float64(rentAmount) * 1.5) // 50% increase in bull market
-	case models.MarketConditionCrash:
-		rentAmount = int(float64(rentAmount) * 0.7) // 30% decrease in crash
-	}
-
-	// Check if payer has enough money
-	if payer.Balance < rentAmount {
-		// In a real implementation, this would handle bankruptcy logic
-		return fmt.Errorf("insufficient funds to pay rent")
-	}
-
-	// Transfer the rent
-	payer.Balance -= rentAmount
-	payee.Balance += rentAmount
-
-	// Update net worth for both players
-	payer.NetWorth = payer.Balance // Simplified, should include property values
-	payee.NetWorth = payee.Balance // Simplified, should include property values
-
-	// Update the lastActivity time
-	game.LastActivity = time.Now()
-	game.UpdatedAt = time.Now()
-
-	// Create a transaction record
-	// In a real implementation, this would be stored in the database
-
-	// Update game in database
-	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-	_, err := collection.UpdateOne(
-		gm.ctx,
-		bson.M{"_id": game.ID},
-		bson.M{
-			"$set": bson.M{
-				"players":      game.Players,
-				"updatedAt":    game.UpdatedAt,
-				"lastActivity": game.LastActivity,
-			},
-		},
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to update game after paying rent: %w", err)
-	}
-
-	gm.logger.Infof("Player %s paid rent of $%d to player %s for property %s",
-		playerID, rentAmount, payee.ID, property.Name)
-
-	return nil
-}
-
-func (gm *GameManager) processDrawCardAction(game *models.Game, playerID string, payload interface{}) error {
-	// This would implement the logic to draw a card
-	return nil
-}
-
-func (gm *GameManager) processUseCardAction(game *models.Game, playerID string, payload interface{}) error {
-	// This would implement the logic to use a card
-	return nil
-}
-
-func (gm *GameManager) processMortgagePropertyAction(game *models.Game, playerID string, payload interface{}) error {
-	// This would implement the logic to mortgage a property
-	return nil
-}
-
-func (gm *GameManager) processUnmortgagePropertyAction(game *models.Game, playerID string, payload interface{}) error {
-	// This would implement the logic to unmortgage a property
-	return nil
-}
-
-func (gm *GameManager) processBuildEngagementAction(game *models.Game, playerID string, payload interface{}) error {
-	// This would implement the logic to build an engagement
-	return nil
-}
-
-func (gm *GameManager) processBuildCheckmarkAction(game *models.Game, playerID string, payload interface{}) error {
-	// This would implement the logic to build a blue checkmark
-	return nil
-}
-
-func (gm *GameManager) processEndTurnAction(game *models.Game, playerID string, payload interface{}) error {
-	gm.logger.Infof("Player %s ending turn in game %s", playerID, game.ID.Hex())
-
-	// Verify it's actually this player's turn
-	if game.CurrentTurn != playerID {
-		return fmt.Errorf("not player's turn")
-	}
-
-	// Find next player in turn order
-	nextIndex := 0
-	for i, id := range game.TurnOrder {
-		if id == playerID {
-			nextIndex = (i + 1) % len(game.TurnOrder)
-			break
-		}
-	}
-
-	// Set next player's turn
-	game.CurrentTurn = game.TurnOrder[nextIndex]
-
-	// Update the market condition counter if applicable
-	if game.MarketCondition != models.MarketConditionNormal {
-		game.MarketConditionRemainingTurns--
-		if game.MarketConditionRemainingTurns <= 0 {
-			// Reset market to normal
-			game.MarketCondition = models.MarketConditionNormal
-			gm.logger.Infof("Market condition reset to NORMAL")
-		}
-	}
-
-	// Check if any players with shadowban should have it removed
-	for i := range game.Players {
-		player := &game.Players[i]
-		if player.Shadowbanned && player.ShadowbanRemainingTurns <= 0 {
-			player.Shadowbanned = false
-		}
-	}
-
-	// Update the lastActivity time
-	game.LastActivity = time.Now()
-	game.UpdatedAt = time.Now()
-
-	// Update game in database
-	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-	_, err := collection.UpdateOne(
-		gm.ctx,
-		bson.M{"_id": game.ID},
-		bson.M{
-			"$set": bson.M{
-				"currentTurn":                   game.CurrentTurn,
-				"marketCondition":               game.MarketCondition,
-				"marketConditionRemainingTurns": game.MarketConditionRemainingTurns,
-				"players":                       game.Players,
-				"updatedAt":                     game.UpdatedAt,
-				"lastActivity":                  game.LastActivity,
-			},
-		},
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to update game after ending turn: %w", err)
-	}
-
-	gm.logger.Infof("Turn ended for player %s, next player is %s",
-		playerID, game.CurrentTurn)
-
-	return nil
-}
-
-func (gm *GameManager) processTradeAction(game *models.Game, playerID string, payload interface{}) error {
-	// This would implement the logic to process a trade
-	return nil
-}
-
-func (gm *GameManager) processSpecialAction(game *models.Game, playerID string, payload interface{}) error {
-	// This would implement the logic for special actions
-	return nil
-}
-
-// ListAvailableGames returns all available games that are in LOBBY or ACTIVE status
-func (gm *GameManager) ListAvailableGames() ([]*models.Game, error) {
-	var games []*models.Game
-
-	// Get games from active games in memory first
-	gm.activeGamesMutex.RLock()
-	for _, session := range gm.activeGames {
-		session.mutex.RLock()
-		// Include only games in LOBBY or ACTIVE status (exclude ABANDONED games)
-		if session.Game.Status == models.GameStatusLobby ||
-			session.Game.Status == models.GameStatusActive {
-			// Create a copy to avoid race conditions
-			gameCopy := *session.Game
-			games = append(games, &gameCopy)
-		}
-		session.mutex.RUnlock()
-	}
-	gm.activeGamesMutex.RUnlock()
-
-	// Then check the database for any games not in memory
-	if gm.mongoClient != nil {
-		collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-
-		// Find games in LOBBY or ACTIVE status only (exclude ABANDONED)
-		filter := bson.M{
-			"status": bson.M{
-				"$in": []models.GameStatus{
-					models.GameStatusLobby,
-					models.GameStatusActive,
-				},
-			},
-		}
-
-		cursor, err := collection.Find(gm.ctx, filter)
-		if err != nil {
-			return games, fmt.Errorf("failed to query games from database: %w", err)
-		}
-		defer cursor.Close(gm.ctx)
-
-		var dbGames []models.Game
-		if err := cursor.All(gm.ctx, &dbGames); err != nil {
-			return games, fmt.Errorf("failed to decode games from database: %w", err)
-		}
-
-		// Check if games are already in memory
-		for i := range dbGames {
-			found := false
-			gameID := dbGames[i].ID.Hex()
-
-			for _, memGame := range games {
-				if memGame.ID.Hex() == gameID {
-					found = true
-					break
-				}
-			}
-
-			// If not in memory, add it
-			if !found {
-				games = append(games, &dbGames[i])
-			}
-		}
-	}
-
-	gm.logger.Infof("Found %d available games", len(games))
-	return games, nil
+	return players, nil
 }
 
 // CleanupStaleGames removes stale or duplicate game records
@@ -2053,6 +1087,62 @@ func (gm *GameManager) CleanupAbandonedGame(gameID string, deleteFromDB bool) er
 	return nil
 }
 
+// ListAvailableGames retrieves all games that are currently in the LOBBY state.
+func (gm *GameManager) ListAvailableGames() ([]models.Game, error) {
+	gm.logger.Info("Fetching available games for lobby")
+
+	if gm.mongoClient == nil {
+		gm.logger.Warn("MongoDB client is nil, cannot fetch available games.")
+		return nil, fmt.Errorf("database connection not available")
+	}
+
+	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
+	filter := bson.M{
+		"status": models.GameStatusLobby,
+	}
+
+	// Find all games in LOBBY state
+	cursor, err := collection.Find(gm.ctx, filter)
+	if err != nil {
+		gm.logger.Errorf("Failed to query available games: %v", err)
+		return nil, fmt.Errorf("failed to query database: %w", err)
+	}
+	defer cursor.Close(gm.ctx)
+
+	var games []models.Game
+	if err := cursor.All(gm.ctx, &games); err != nil {
+		gm.logger.Errorf("Failed to decode available games: %v", err)
+		return nil, fmt.Errorf("failed to decode game data: %w", err)
+	}
+
+	gm.logger.Infof("Found %d available games", len(games))
+	return games, nil
+}
+
+// ProcessGameAction handles incoming game actions from players.
+func (gm *GameManager) ProcessGameAction(action models.GameAction) error {
+	gm.logger.Infof("Processing game action: %s for game %s, player %s", action.Type, action.GameID, action.PlayerID)
+
+	// Here you would have a switch statement or other logic to handle different action types.
+	// For example:
+	switch action.Type {
+	case "roll_dice":
+		// Logic for rolling dice
+		gm.logger.Infof("Player %s is rolling the dice.", action.PlayerID)
+	case "buy_property":
+		// Logic for buying a property
+		gm.logger.Infof("Player %s is buying a property.", action.PlayerID)
+	default:
+		return fmt.Errorf("unknown game action type: %s", action.Type)
+	}
+
+	// After processing the action, you might need to broadcast the new game state.
+	// For example:
+	// gm.broadcastGameState(action.GameID)
+
+	return nil
+}
+
 // broadcastLobbyUpdate sends the current list of available games to all lobby clients
 func (gm *GameManager) broadcastLobbyUpdate() {
 	games, err := gm.ListAvailableGames()
@@ -2106,5 +1196,181 @@ func (gm *GameManager) UpdateGame(game *models.Game) error {
 	}
 
 	gm.logger.Debugf("Successfully updated game %s in memory and database", game.ID.Hex())
+	return nil
+}
+
+// RejoinGame allows a player to rejoin a game they were previously connected to
+func (gm *GameManager) RejoinGame(gameID, playerID, sessionID string) error {
+	gm.activeGamesMutex.RLock()
+	session, exists := gm.activeGames[gameID]
+	gm.activeGamesMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("game session not found")
+	}
+
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+
+	// Check if the game is still in progress
+	if session.Game.Status != models.GameStatusActive {
+		return fmt.Errorf("cannot rejoin game that is not active")
+	}
+
+	// Check if the player is already in the game
+	if _, ok := session.ConnectedPlayers[playerID]; ok {
+		return fmt.Errorf("player is already in the game")
+	}
+
+	// Add the player back to the game
+	player := models.Player{
+		ID:             playerID,
+		Status:         models.PlayerStatusActive,
+		Balance:        1500, // Reset balance, or fetch from saved state
+		Position:       0,    // Reset position, or fetch from saved state
+		Cards:          []models.Card{},
+		Properties:     []string{},
+		InitialDeposit: 0,    // No deposit yet
+		NetWorth:       1500, // Same as initial balance
+	}
+
+	session.Game.Players = append(session.Game.Players, player)
+	session.Game.TurnOrder = append(session.Game.TurnOrder, playerID)
+	session.Game.LastActivity = time.Now()
+
+	// Update the game state in the database
+	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
+	_, err := collection.UpdateOne(
+		gm.ctx,
+		bson.M{"_id": session.Game.ID},
+		bson.M{
+			"$set": bson.M{
+				"players":      session.Game.Players,
+				"turnOrder":    session.Game.TurnOrder,
+				"lastActivity": session.Game.LastActivity,
+			},
+		},
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update game in database: %w", err)
+	}
+
+	// Restore the player's connection
+	session.ConnectedPlayers[playerID] = sessionID
+	session.PlayerConnections[sessionID] = PlayerConnection{
+		PlayerID:    playerID,
+		SessionID:   sessionID,
+		IsConnected: true,
+	}
+
+	gm.logger.Infof("Player %s rejoined game %s", playerID, gameID)
+
+	// Notify the player of the current game state
+	gameState := map[string]interface{}{
+		"type":        "game_state",
+		"gameId":      gameID,
+		"status":      string(session.Game.Status),
+		"currentTurn": session.Game.CurrentTurn,
+		"players":     session.Game.Players,
+		"turnOrder":   session.Game.TurnOrder,
+		"timestamp":   time.Now().Format(time.RFC3339),
+	}
+
+	// Marshal to JSON
+	msgBytes, err := json.Marshal(gameState)
+	if err != nil {
+		return fmt.Errorf("failed to marshal game state message: %w", err)
+	}
+
+	// Send the current game state to the rejoining player
+	if gm.wsHub != nil {
+		gm.wsHub.BroadcastToGame(gameID, msgBytes)
+		gm.logger.Infof("Broadcasted game state to rejoining player %s in game %s", playerID, gameID)
+	} else {
+		gm.logger.Warnf("WebSocket hub is nil, cannot send game state to rejoining player")
+	}
+
+	return nil
+}
+
+// HandlePlayerMessage processes a message from a player
+func (gm *GameManager) HandlePlayerMessage(gameID, playerID string, message []byte) error {
+	gm.logger.Debugf("Received message from player %s in game %s: %s", playerID, gameID, string(message))
+
+	gm.activeGamesMutex.RLock()
+	session, exists := gm.activeGames[gameID]
+	gm.activeGamesMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("game session not found")
+	}
+
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+
+	// Handle different message types
+	var msgData map[string]interface{}
+	if err := json.Unmarshal(message, &msgData); err != nil {
+		return fmt.Errorf("failed to unmarshal message: %w", err)
+	}
+
+	msgType, ok := msgData["type"].(string)
+	if !ok {
+		return fmt.Errorf("message type not specified or invalid")
+	}
+
+	switch msgType {
+	case "player_action":
+		// Handle player action (e.g., make a move, buy property, etc.)
+		return gm.handlePlayerAction(session, playerID, msgData)
+	case "chat_message":
+		// Handle chat message
+		return gm.handleChatMessage(session, playerID, msgData)
+	default:
+		return fmt.Errorf("unknown message type: %s", msgType)
+	}
+}
+
+// handlePlayerAction processes a player action message
+func (gm *GameManager) handlePlayerAction(session *GameSession, playerID string, msgData map[string]interface{}) error {
+	// Implement action handling logic (e.g., update game state, validate moves, etc.)
+	gm.logger.Infof("Processing player action from %s in game %s: %v", playerID, session.Game.ID.Hex(), msgData)
+
+	// For example, let's just update the last activity time for now
+	session.Game.LastActivity = time.Now()
+
+	// TODO: Add actual game action processing logic here
+
+	return nil
+}
+
+// handleChatMessage processes a chat message from a player
+func (gm *GameManager) handleChatMessage(session *GameSession, playerID string, msgData map[string]interface{}) error {
+	// Implement chat message handling (e.g., broadcast to other players, etc.)
+	gm.logger.Infof("Received chat message from %s in game %s: %v", playerID, session.Game.ID.Hex(), msgData)
+
+	// For now, let's just broadcast the chat message to all players in the game
+	if gm.wsHub != nil {
+		chatMsg := map[string]interface{}{
+			"type":      "chat_message",
+			"playerId":  playerID,
+			"message":   msgData["message"],
+			"timestamp": time.Now().Format(time.RFC3339),
+		}
+
+		// Marshal to JSON
+		msgBytes, err := json.Marshal(chatMsg)
+		if err != nil {
+			return fmt.Errorf("failed to marshal chat message: %w", err)
+		}
+
+		// Broadcast to all clients in the game
+		gm.wsHub.BroadcastToGame(session.Game.ID.Hex(), msgBytes)
+		gm.logger.Infof("Broadcasted chat message from %s to all clients in game %s", playerID, session.Game.ID.Hex())
+	} else {
+		gm.logger.Warnf("WebSocket hub is nil, cannot broadcast chat message")
+	}
+
 	return nil
 }
