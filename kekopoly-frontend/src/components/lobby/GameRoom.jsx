@@ -125,7 +125,7 @@ const playerSelector = (state) => {
 
 const GameRoom = () => {
   const { gameId: rawGameId } = useParams();
-  // Always normalize room code to lowercase to match server expectations
+  // Keep lowercase for frontend UI consistency, but use uppercase for backend communication
   const roomId = rawGameId ? rawGameId.toLowerCase().trim() : '';
   const navigate = useNavigate();
   const dispatch = useDispatch();
@@ -278,11 +278,22 @@ const GameRoom = () => {
     }
 
     if (!socketService || !socketService.isConnected()) {
-      console.log('[PLAYER_DISPLAY] Cannot broadcast player info: Socket not ready', { 
-        socketExists: !!socketService,
-        socketConnected: socketService?.socket?.readyState === WebSocket.OPEN,
-        socketReady: socketService?.socketReady 
-      });
+      console.log('[PLAYER_DISPLAY] Cannot broadcast: Socket not connected');
+      return;
+    }
+
+    // CRITICAL FIX: Ensure room code case consistency
+    const normalizedRoomId = roomId.toUpperCase(); // Backend expects uppercase
+
+    // Check if socket is ready for messages
+    if (!socketService.socketReady) {
+      console.log('[PLAYER_DISPLAY] Socket not ready for messages, queuing broadcast');
+      // Queue the message for when socket becomes ready
+      setTimeout(() => {
+        if (socketService && socketService.isConnected() && socketService.socketReady) {
+          broadcastPlayerInfo(initialPlayerData);
+        }
+      }, 500);
       return;
     }
 
@@ -673,8 +684,10 @@ const GameRoom = () => {
       if (roomId && token && socketService) { // Use the 'token' (JWT) from Redux state, NOT storedCharacterToken
         // console.log('Attempting initial connection/reconnection for existing player:', storedPlayerId);
         // console.log(`Using Auth Token: ${token.substring(0,10)}...`);
+        // CRITICAL FIX: Use uppercase room ID for backend consistency
+        const normalizedRoomIdForBackend = roomId.toUpperCase();
         // --- PASS THE CORRECT AUTH TOKEN (JWT) ---
-        socketService.connect(roomId, storedPlayerId, token)
+        socketService.connect(normalizedRoomIdForBackend, storedPlayerId, token)
         // ---
           .then(() => {
             // Request host information immediately after connection
@@ -792,8 +805,11 @@ const GameRoom = () => {
           // Get the player data from state to include in reconnection
           const playerData = playersInStore[currentPlayerId];
 
+          // CRITICAL FIX: Use uppercase room ID for backend consistency
+          const normalizedRoomIdForBackend = roomId.toUpperCase();
+          
           // Connect with player data to ensure proper synchronization
-          socketService.connect(roomId, currentPlayerId, token, playerData)
+          socketService.connect(normalizedRoomIdForBackend, currentPlayerId, token, playerData)
             .then(() => {
               // console.log('[SOCKET_RECONNECT] Reconnection successful');
 
@@ -1103,14 +1119,17 @@ const GameRoom = () => {
         return;
       }
       
+      // CRITICAL FIX: Ensure room code case consistency - use uppercase for backend
+      const normalizedRoomIdForBackend = roomId.toUpperCase();
+      
       // Generate a consistent player ID based on JWT userId and room
       // This ensures the same user gets the same player ID for a specific room
-      const uniquePlayerId = `${jwtUserId}_${roomId.toLowerCase()}`;
+      const uniquePlayerId = `${jwtUserId}_${normalizedRoomIdForBackend}`;
       
       console.log('[PLAYER_REGISTRATION] Generated consistent player ID:', {
         jwtUserId,
         uniquePlayerId,
-        roomId,
+        roomId: normalizedRoomIdForBackend,
         tokenValid: !isTokenExpired(token)
       });
 
@@ -1166,7 +1185,8 @@ const GameRoom = () => {
 
       // --- Connect to WebSocket and wait for it to open ---
       try {
-        await socketService.connect(roomId, uniquePlayerId, token, playerData);
+        // CRITICAL FIX: Use uppercase room ID for backend consistency
+        await socketService.connect(normalizedRoomIdForBackend, uniquePlayerId, token, playerData);
         
         // Verify connection was successful
         if (!socketService.socket || socketService.socket.readyState !== WebSocket.OPEN) {
@@ -1182,7 +1202,7 @@ const GameRoom = () => {
         // (This prevents showing the player in the UI when they're not actually connected)
         dispatch(removePlayer(uniquePlayerId));
         
-        // Clear localStorage
+        // Clear localStorage (use original roomId for localStorage keys)
         localStorage.removeItem(`kekopoly_player_${roomId}`);
         localStorage.removeItem(`kekopoly_player_name_${roomId}`);
         localStorage.removeItem(`kekopoly_player_token_${roomId}`);

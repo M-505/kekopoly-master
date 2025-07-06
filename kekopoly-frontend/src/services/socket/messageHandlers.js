@@ -78,6 +78,11 @@ export function sendMessage(type, payload = {}) {
       );
       
       if (!existingMessage) {
+        // Set priority based on message type for proper sequencing
+        let priority = 'normal';
+        if (type === 'player_joined') priority = 'high';
+        if (type === 'update_player_info') priority = 'low'; // After player_joined
+        
         const queuedMessage = {
           type,
           payload: {
@@ -85,10 +90,11 @@ export function sendMessage(type, payload = {}) {
             gameId: this.gameId,
             playerId: this.playerId
           },
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          priority: payload.priority || priority // Allow override from payload
         };
         this.saveState('messageQueue', [...messageQueue, queuedMessage]);
-        log('SOCKET', 'Message queued until socket is ready:', type);
+        log('SOCKET', `Message queued with priority ${queuedMessage.priority}:`, type);
       } else {
         log('SOCKET', 'Message already queued, skipping duplicate:', type);
       }
@@ -143,10 +149,29 @@ export function sendQueuedMessages() {
 
     // Filter out duplicate messages and old messages (older than 30 seconds)
     const now = Date.now();
-    const uniqueMessages = [];
+    const validMessages = [];
     const seenMessages = new Set();
     
-    messageQueue.forEach(message => {
+    // Sort messages by priority and timestamp to ensure proper sequencing
+    const sortedMessages = messageQueue.sort((a, b) => {
+      // Priority order: player_joined always first, then by priority, then by timestamp
+      if (a.type === 'player_joined' && b.type !== 'player_joined') return -1;
+      if (b.type === 'player_joined' && a.type !== 'player_joined') return 1;
+      
+      // For non-player_joined messages, sort by priority then timestamp
+      const priorityOrder = { high: 3, normal: 2, low: 1 };
+      const aPriority = priorityOrder[a.priority] || 2;
+      const bPriority = priorityOrder[b.priority] || 2;
+      
+      if (aPriority !== bPriority) {
+        return bPriority - aPriority; // Higher priority first
+      }
+      
+      // For same priority, sort by timestamp (older first)
+      return a.timestamp - b.timestamp;
+    });
+    
+    sortedMessages.forEach(message => {
       // Skip old messages
       if (now - message.timestamp > 30000) {
         log('SOCKET', `Skipping old queued message: ${message.type}`);
@@ -156,34 +181,37 @@ export function sendQueuedMessages() {
       // Create a unique key for this message type and player
       const messageKey = `${message.type}-${message.payload.playerId}`;
       
-      // Only keep the most recent message of each type per player
-      if (!seenMessages.has(messageKey)) {
+      // For critical sequencing, always keep player_joined messages and filter duplicates of others
+      if (message.type === 'player_joined' || !seenMessages.has(messageKey)) {
         seenMessages.add(messageKey);
-        uniqueMessages.push(message);
+        validMessages.push(message);
       } else {
         log('SOCKET', `Skipping duplicate queued message: ${message.type}`);
       }
     });
 
-    // Process unique messages with error handling
+    // Process valid messages with proper delays for sequencing
     let successCount = 0;
-    uniqueMessages.forEach((message, index) => {
+    validMessages.forEach((message, index) => {
+      // Add extra delay for token updates to ensure they come after player_joined
+      const delay = message.type === 'update_player_info' ? (index + 1) * 300 : index * 100;
+      
       setTimeout(() => {
         if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
-          log('SOCKET', `Sending queued message ${index + 1}/${uniqueMessages.length}: ${message.type}`);
+          log('SOCKET', `Sending queued message ${index + 1}/${validMessages.length}: ${message.type}`);
           const success = this.sendMessage(message.type, message.payload);
           if (success) {
             successCount++;
           }
           
           // Log summary after all messages are processed
-          if (index === uniqueMessages.length - 1) {
-            log('SOCKET', `Completed sending queued messages: ${successCount}/${uniqueMessages.length} successful`);
+          if (index === validMessages.length - 1) {
+            log('SOCKET', `Completed sending queued messages: ${successCount}/${validMessages.length} successful`);
           }
         } else {
           logWarning('SOCKET', `Cannot send queued message ${message.type}: Socket no longer ready`);
         }
-      }, index * 100); // 100ms delay between messages
+      }, delay); // Variable delay based on message type
     });
 
     // Clear the queue after processing

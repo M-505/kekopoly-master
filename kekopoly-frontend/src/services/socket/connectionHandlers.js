@@ -31,8 +31,8 @@ export function connect(gameId, playerId, token, initialPlayerData) {
     return Promise.reject(new Error(errorMessage));
   }
 
-  // Ensure roomId is lowercase
-  const normalizedRoomId = gameId.toLowerCase().trim();
+  // Ensure roomId is properly normalized (backend expects uppercase, frontend uses lowercase)
+  const normalizedRoomId = gameId.toUpperCase().trim(); // Backend expects uppercase
   this.gameId = normalizedRoomId;
   this.playerId = playerId;
 
@@ -165,9 +165,14 @@ export function connect(gameId, playerId, token, initialPlayerData) {
       // Use API URL environment variable and convert to WebSocket host
       const apiUrl = import.meta.env.VITE_API_URL;
       host = apiUrl.replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '');
+      log('CONNECT', `Using VITE_API_URL for WebSocket host: ${host}`);
     } else if (window.location.hostname === 'localhost') {
       // Development mode
       host = 'localhost:8080';
+    } else if (window.location.hostname.includes('onrender.com')) {
+      // Render.com deployment - both frontend and backend are on the same service
+      host = window.location.host;
+      log('CONNECT', `Using render.com host: ${host}`);
     } else {
       // Production mode - use current host
       host = window.location.host;
@@ -262,30 +267,50 @@ export function connect(gameId, playerId, token, initialPlayerData) {
         if (initialPlayerData) {
           log('CONNECT', 'Sending initial player data on connection:', initialPlayerData);
 
-          // Send player_joined message with complete player data
+          // CRITICAL: Send player_joined message FIRST to establish player in backend
           this.sendMessage('player_joined', {
-            playerId: this.playerId,
-            playerData: initialPlayerData
+            player: initialPlayerData // Use correct format that backend expects
           });
 
-          // Also send update_player message as a backup
-          this.sendMessage('update_player', {
-            playerId: this.playerId,
-            ...initialPlayerData
-          });
+          // Wait briefly to ensure player_joined is processed before sending updates
+          setTimeout(() => {
+            if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+              // Now send token update if player has a token
+              if (initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji) {
+                this.sendMessage('update_player_info', {
+                  playerId: this.playerId,
+                  token: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
+                  characterToken: initialPlayerData.token || initialPlayerData.characterToken || initialPlayerData.emoji,
+                  emoji: initialPlayerData.emoji || initialPlayerData.token || '👤'
+                });
+                log('CONNECT', 'Sent token update after player join confirmation');
+              }
+            }
+          }, 250); // Small delay to ensure proper order
+
         } else if (this.initialPlayerDataToSend) {
           log('CONNECT', 'Sending stored player data on connection:', this.initialPlayerDataToSend);
 
-          // Send player_joined message with complete player data
+          // CRITICAL: Send player_joined message FIRST to establish player in backend
           this.sendMessage('player_joined', {
-            playerId: this.playerId,
-            playerData: this.initialPlayerDataToSend
+            player: this.initialPlayerDataToSend // Use correct format that backend expects
           });
 
-          // Also send as legacy format
-          this.sendMessage('player_joined', {
-            player: this.initialPlayerDataToSend
-          });
+          // Wait briefly to ensure player_joined is processed before sending updates
+          setTimeout(() => {
+            if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
+              // Now send token update if player has a token
+              if (this.initialPlayerDataToSend.token || this.initialPlayerDataToSend.characterToken || this.initialPlayerDataToSend.emoji) {
+                this.sendMessage('update_player_info', {
+                  playerId: this.playerId,
+                  token: this.initialPlayerDataToSend.token || this.initialPlayerDataToSend.characterToken || this.initialPlayerDataToSend.emoji,
+                  characterToken: this.initialPlayerDataToSend.token || this.initialPlayerDataToSend.characterToken || this.initialPlayerDataToSend.emoji,
+                  emoji: this.initialPlayerDataToSend.emoji || this.initialPlayerDataToSend.token || '👤'
+                });
+                log('CONNECT', 'Sent token update after stored player join confirmation');
+              }
+            }
+          }, 250); // Small delay to ensure proper order
 
           // Store in connection state before clearing
           this.saveState('lastSentPlayerData', this.initialPlayerDataToSend);
@@ -711,6 +736,9 @@ export function handleError(error) {
     host = apiUrl.replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '');
   } else if (window.location.hostname === 'localhost') {
     host = 'localhost:8080';
+  } else if (window.location.hostname.includes('onrender.com')) {
+    // Render.com deployment - both frontend and backend are on the same service
+    host = window.location.host;
   } else {
     host = window.location.host;
   }
@@ -725,7 +753,11 @@ export function handleError(error) {
       log('WS_ERROR', 'Backend health check response:', response.status);
     })
     .catch(err => {
-      logError('WS_ERROR', 'Backend appears to be unreachable. Check if the server is running on port 8080:', err);
+      if (window.location.hostname.includes('onrender.com')) {
+        logError('WS_ERROR', 'Backend appears to be unreachable on render.com. Check if the service is running and properly configured:', err);
+      } else {
+        logError('WS_ERROR', 'Backend appears to be unreachable. Check if the server is running on the expected port:', err);
+      }
     });
 }
 
