@@ -193,12 +193,19 @@ export function sendQueuedMessages() {
     // Process valid messages with proper delays for sequencing
     let successCount = 0;
     validMessages.forEach((message, index) => {
-      // Add extra delay for token updates to ensure they come after player_joined
-      const delay = message.type === 'update_player_info' ? (index + 1) * 300 : index * 100;
+      // Use the delay specified in the message, or calculate based on type and position
+      let delay = message.delay || 0;
+      if (delay === 0) {
+        // Add extra delay for token updates to ensure they come after player_joined
+        delay = message.type === 'update_player_info' ? (index + 1) * 300 : index * 100;
+      } else {
+        // If a specific delay was provided, add index-based spacing to prevent simultaneous sends
+        delay += index * 50;
+      }
       
       setTimeout(() => {
         if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady) {
-          log('SOCKET', `Sending queued message ${index + 1}/${validMessages.length}: ${message.type}`);
+          log('SOCKET', `Sending queued message ${index + 1}/${validMessages.length}: ${message.type} (delayed ${delay}ms)`);
           const success = this.sendMessage(message.type, message.payload);
           if (success) {
             successCount++;
@@ -211,11 +218,43 @@ export function sendQueuedMessages() {
         } else {
           logWarning('SOCKET', `Cannot send queued message ${message.type}: Socket no longer ready`);
         }
-      }, delay); // Variable delay based on message type
+      }, delay); // Use calculated or specified delay
     });
 
     // Clear the queue after processing
     this.saveState('messageQueue', []);
+  }
+}
+
+/**
+ * Queue a message to be sent when the socket is ready
+ * @param {string} type - The message type
+ * @param {Object} payload - The message payload
+ * @param {string} priority - The priority level ('high', 'normal', 'low')
+ * @param {number} delay - Optional delay in milliseconds before sending
+ */
+export function queueMessage(type, payload = {}, priority = 'normal', delay = 0) {
+  if (!this.messageQueue) {
+    this.messageQueue = [];
+    log('QUEUE', 'Initialized message queue');
+  }
+
+  const message = {
+    type,
+    payload,
+    priority,
+    delay,
+    timestamp: Date.now(),
+    id: Math.random().toString(36).substring(2) // Unique ID for deduplication
+  };
+
+  // Add to queue
+  this.messageQueue.push(message);
+  log('QUEUE', `Queued ${type} message with priority ${priority} and delay ${delay}ms`, payload);
+
+  // If socket is ready and no delay, try to send immediately
+  if (this.socket && this.socket.readyState === WebSocket.OPEN && this.socketReady && delay === 0) {
+    this.sendQueuedMessages();
   }
 }
 

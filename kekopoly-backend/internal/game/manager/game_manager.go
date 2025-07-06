@@ -45,6 +45,7 @@ type GameManager struct {
 // WebSocketHub defines the interface for broadcasting messages to clients
 type WebSocketHub interface {
 	BroadcastToGame(gameID string, message []byte)
+	BroadcastToLobby(message []byte)
 }
 
 // MessageQueue defines the interface for the message queue
@@ -842,6 +843,15 @@ func (gm *GameManager) PlayerDisconnected(gameID, sessionID string) { // Reverte
 	if session.Game.Status == models.GameStatusAbandoned {
 		updateFields["status"] = session.Game.Status
 		gm.logger.Debugf("[PlayerDisconnected] Preparing to update status to '%s' in DB for game %s", session.Game.Status, gameID)
+		
+		// Schedule cleanup of the abandoned game after a brief delay
+		go func() {
+			time.Sleep(2 * time.Second) // Give time for final messages to be sent
+			gm.logger.Infof("[PlayerDisconnected] Starting cleanup of abandoned game %s", gameID)
+			if err := gm.CleanupAbandonedGame(gameID, true); err != nil {
+				gm.logger.Errorf("[PlayerDisconnected] Failed to cleanup abandoned game %s: %v", gameID, err)
+			}
+		}()
 	}
 
 	gm.logger.Debugf("[PlayerDisconnected] Attempting to update game %s in MongoDB with fields: %+v", gameID, updateFields)
@@ -1717,7 +1727,7 @@ func (gm *GameManager) processSpecialAction(game *models.Game, playerID string, 
 	return nil
 }
 
-// ListAvailableGames returns all available games that are in LOBBY, ACTIVE, or ABANDONED status
+// ListAvailableGames returns all available games that are in LOBBY or ACTIVE status
 func (gm *GameManager) ListAvailableGames() ([]*models.Game, error) {
 	var games []*models.Game
 
@@ -1725,10 +1735,9 @@ func (gm *GameManager) ListAvailableGames() ([]*models.Game, error) {
 	gm.activeGamesMutex.RLock()
 	for _, session := range gm.activeGames {
 		session.mutex.RLock()
-		// Include games in LOBBY, ACTIVE, or ABANDONED status
+		// Include only games in LOBBY or ACTIVE status (exclude ABANDONED games)
 		if session.Game.Status == models.GameStatusLobby ||
-			session.Game.Status == models.GameStatusActive ||
-			session.Game.Status == models.GameStatusAbandoned {
+			session.Game.Status == models.GameStatusActive {
 			// Create a copy to avoid race conditions
 			gameCopy := *session.Game
 			games = append(games, &gameCopy)
@@ -1741,13 +1750,12 @@ func (gm *GameManager) ListAvailableGames() ([]*models.Game, error) {
 	if gm.mongoClient != nil {
 		collection := gm.mongoClient.Database(gm.dbName).Collection("games")
 
-		// Find games in LOBBY, ACTIVE, or ABANDONED status
+		// Find games in LOBBY or ACTIVE status only (exclude ABANDONED)
 		filter := bson.M{
 			"status": bson.M{
 				"$in": []models.GameStatus{
 					models.GameStatusLobby,
 					models.GameStatusActive,
-					models.GameStatusAbandoned,
 				},
 			},
 		}
@@ -1965,140 +1973,87 @@ func (gm *GameManager) CleanupStaleGames() ([]string, error) {
 	return removedGames, nil
 }
 
-// RemoveGameSession removes a game session from the active games map
-// This is typically called when a game ends or should be cleaned up
-func (gm *GameManager) RemoveGameSession(gameID string) {
-	gm.activeGamesMutex.Lock()
-	defer gm.activeGamesMutex.Unlock()
+// CleanupAbandonedGame removes an abandoned game from memory and optionally from database
+func (gm *GameManager) CleanupAbandonedGame(gameID string, deleteFromDB bool) error {
+	gm.logger.Infof("[CleanupAbandonedGame] Starting cleanup for abandoned game %s (deleteFromDB: %t)", gameID, deleteFromDB)
 
-	if _, exists := gm.activeGames[gameID]; exists {
+	// Remove from active games in memory
+	gm.activeGamesMutex.Lock()
+	_, exists := gm.activeGames[gameID]
+	if exists {
 		delete(gm.activeGames, gameID)
-		gm.logger.Infof("Removed game session %s from active games map", gameID)
-	} else {
-		gm.logger.Warnf("Attempted to remove non-existent game session %s from active games map", gameID)
+		gm.logger.Debugf("[CleanupAbandonedGame] Removed game %s from active games in memory", gameID)
+	}
+	gm.activeGamesMutex.Unlock()
+
+	// Clean up any remaining WebSocket connections for this game
+	if exists && gm.wsHub != nil {
+		// Notify any remaining clients that the game has been deleted
+		deleteMsg := map[string]interface{}{
+			"type":    "game_deleted",
+			"gameId":  gameID,
+			"reason":  "abandoned",
+			"message": "Game has been removed due to inactivity",
+		}
+		msgBytes, _ := json.Marshal(deleteMsg)
+		gm.wsHub.BroadcastToGame(gameID, msgBytes)
+		
+		// Give a brief moment for the message to be sent before cleanup
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	// TODO: Optionally, add logic here to also mark the game as finished/archived in the database if needed
-	// For now, just removes from the active sessions list
+	// Delete from database if requested
+	if deleteFromDB && gm.mongoClient != nil {
+		objID, err := primitive.ObjectIDFromHex(gameID)
+		if err != nil {
+			gm.logger.Errorf("[CleanupAbandonedGame] Invalid game ID format %s: %v", gameID, err)
+			return fmt.Errorf("invalid game ID format: %w", err)
+		}
+
+		collection := gm.mongoClient.Database(gm.dbName).Collection("games")
+		result, err := collection.DeleteOne(gm.ctx, bson.M{"_id": objID})
+		if err != nil {
+			gm.logger.Errorf("[CleanupAbandonedGame] Failed to delete game %s from database: %v", gameID, err)
+			return fmt.Errorf("failed to delete game from database: %w", err)
+		}
+
+		if result.DeletedCount > 0 {
+			gm.logger.Infof("[CleanupAbandonedGame] Successfully deleted game %s from database", gameID)
+		} else {
+			gm.logger.Warnf("[CleanupAbandonedGame] Game %s was not found in database (may have been deleted already)", gameID)
+		}
+	}
+
+	// Broadcast updated lobby state to all lobby clients
+	if gm.wsHub != nil {
+		gm.broadcastLobbyUpdate()
+	}
+
+	gm.logger.Infof("[CleanupAbandonedGame] Cleanup completed for game %s", gameID)
+	return nil
 }
 
-// PlayerConnected is called by the hub when a player's WebSocket connects successfully.
-// It updates the GameSession state to track the connection.
-func (gm *GameManager) PlayerConnected(gameID, playerID, sessionID string) {
-	gm.logger.Debugf("[PlayerConnected] Called for game %s, player %s, session %s", gameID, playerID, sessionID)
-
-	// Handle lobby connections specially - they don't represent actual games
-	if gameID == "lobby" {
-		gm.logger.Debugf("[PlayerConnected] Lobby connection for player %s, session %s - no game session needed", playerID, sessionID)
+// broadcastLobbyUpdate sends the current list of available games to all lobby clients
+func (gm *GameManager) broadcastLobbyUpdate() {
+	games, err := gm.ListAvailableGames()
+	if err != nil {
+		gm.logger.Errorf("[broadcastLobbyUpdate] Failed to get available games: %v", err)
 		return
 	}
 
-	gm.activeGamesMutex.RLock()
-	session, ok := gm.activeGames[gameID]
-	gm.activeGamesMutex.RUnlock()
-
-	if !ok {
-		gm.logger.Warnf("[PlayerConnected] Game session %s not found in memory for player %s, session %s. Loading from DB.", gameID, playerID, sessionID)
-		// Attempt to load from DB if not in memory (e.g., after a server restart where game was active)
-		var err error
-		gameData, err := gm.GetGame(gameID)
-		if err != nil {
-			gm.logger.Errorf("[PlayerConnected] Failed to load game data %s from DB: %v", gameID, err)
-			return
-		}
-		if gameData == nil {
-			gm.logger.Errorf("[PlayerConnected] Game data %s not found in DB for player %s session %s", gameID, playerID, sessionID)
-			return
-		}
-
-		// Create and store the session in memory
-		session = &GameSession{
-			Game:              gameData,
-			ConnectedPlayers:  make(map[string]string),
-			PlayerConnections: make(map[string]PlayerConnection),
-		}
-		gm.activeGamesMutex.Lock()
-		gm.activeGames[gameID] = session
-		gm.activeGamesMutex.Unlock()
-		gm.logger.Debugf("[PlayerConnected] Loaded game session %s from DB and added to memory", gameID)
+	updateMsg := map[string]interface{}{
+		"type":  "lobby_update",
+		"games": games,
 	}
 
-	session.mutex.Lock()
-	defer session.mutex.Unlock()
-	gm.logger.Debugf("[PlayerConnected] Acquired lock for game %s session", gameID)
-
-	// --- Update connection tracking ---
-	// Store sessionID -> connection info
-	session.PlayerConnections[sessionID] = PlayerConnection{
-		PlayerID:    playerID,
-		SessionID:   sessionID,
-		IsConnected: true,
-	}
-	// Store playerID -> sessionID (reverse lookup)
-	session.ConnectedPlayers[playerID] = sessionID
-
-	gm.logger.Debugf("[PlayerConnected] Updated connection maps for game %s: Player %s linked to Session %s", gameID, playerID, sessionID)
-
-	// --- Update player status in game data ---
-	playerFound := false
-	for i := range session.Game.Players {
-		if session.Game.Players[i].ID == playerID {
-			if session.Game.Players[i].Status != models.PlayerStatusActive {
-				gm.logger.Infof("[PlayerConnected] Updating player %s status from %s to ACTIVE in game %s", playerID, session.Game.Players[i].Status, gameID)
-				session.Game.Players[i].Status = models.PlayerStatusActive
-				// Optionally save this change immediately or let it be saved on next action
-				// For now, let's assume it gets saved later to avoid excessive DB writes.
-			} else {
-				gm.logger.Debugf("[PlayerConnected] Player %s already ACTIVE in game %s", playerID, gameID)
-			}
-			playerFound = true
-			break
-		}
-	}
-
-	if !playerFound {
-		gm.logger.Warnf("[PlayerConnected] Player %s not found in game %s player list after connection", playerID, gameID)
-		// This might happen if the player connected via WS before their JoinGame API call completed fully.
-		// Depending on requirements, might need to handle this case more robustly.
-	}
-
-	gm.logger.Debugf("[PlayerConnected] Finished processing for game %s, player %s, session %s", gameID, playerID, sessionID)
-}
-
-// UpdateGame updates a game in the database and in memory
-func (gm *GameManager) UpdateGame(game *models.Game) error {
-	if game == nil {
-		return fmt.Errorf("game is nil")
-	}
-
-	// Update game in database
-	collection := gm.mongoClient.Database(gm.dbName).Collection("games")
-	game.UpdatedAt = time.Now()
-	game.LastActivity = time.Now()
-
-	_, err := collection.UpdateOne(
-		gm.ctx,
-		bson.M{"_id": game.ID},
-		bson.M{
-			"$set": game,
-		},
-	)
-
+	msgBytes, err := json.Marshal(updateMsg)
 	if err != nil {
-		return fmt.Errorf("failed to update game in database: %w", err)
+		gm.logger.Errorf("[broadcastLobbyUpdate] Failed to marshal lobby update message: %v", err)
+		return
 	}
 
-	// Update game in memory if it exists in active games
-	gm.activeGamesMutex.RLock()
-	session, exists := gm.activeGames[game.ID.Hex()]
-	gm.activeGamesMutex.RUnlock()
-
-	if exists {
-		session.mutex.Lock()
-		session.Game = game
-		session.mutex.Unlock()
-		gm.logger.Infof("Updated game %s in memory", game.ID.Hex())
+	gm.logger.Debugf("[broadcastLobbyUpdate] Broadcasting lobby update with %d games", len(games))
+	if gm.wsHub != nil {
+		gm.wsHub.BroadcastToLobby(msgBytes)
 	}
-
-	return nil
 }

@@ -860,3 +860,29 @@ export function resetPlayerRegistrationState() {
   this.saveState('playerRegisteredInBackend', false);
   log('CONNECT', 'Player registration state reset');
 }
+
+/**
+ * Explicitly leave the current game
+ * This sends a leave_game message to the server for proper cleanup
+ */
+export function leaveGame() {
+  if (this.socket && this.socket.readyState === WebSocket.OPEN && this.gameId && this.playerId) {
+    log('LEAVE', `Player ${this.playerId} leaving game ${this.gameId}`);
+    
+    try {
+      this.sendMessage('leave_game', {
+        gameId: this.gameId,
+        playerId: this.playerId,
+        sessionId: this.sessionId,
+        timestamp: Date.now()
+      });
+      
+      log('LEAVE', 'Sent leave_game message to server');
+    } catch (e) {
+      logWarning('LEAVE', 'Failed to send leave_game message:', e);
+    }
+  }
+
+  // Reset registration state when leaving
+  this.resetPlayerRegistrationState();
+}

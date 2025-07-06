@@ -2044,6 +2044,37 @@ func (c *Client) handleMessage(message []byte) {
 
 		// Also broadcast the updated list of active players to all clients
 		c.handleGetActivePlayers()
+		break
+
+	case "leave_game":
+		// Handle explicit leave game request
+		c.hub.logger.Infof("Player %s explicitly leaving game %s", c.playerID, c.gameID)
+		
+		// Call game manager to handle player disconnection
+		// This will mark the player as disconnected and potentially clean up the game
+		c.hub.gameManager.PlayerDisconnected(c.gameID, c.sessionID)
+		
+		// Send confirmation back to the leaving player
+		leaveConfirmation := map[string]interface{}{
+			"type":    "leave_game_confirmed",
+			"gameId":  c.gameID,
+			"success": true,
+			"message": "Successfully left the game",
+		}
+		
+		confirmationJSON, err := json.Marshal(leaveConfirmation)
+		if err == nil {
+			c.hub.SendToPlayerWithPriority(c.gameID, c.playerID, confirmationJSON, PriorityHigh)
+		}
+		
+		// Close the client connection gracefully
+		go func() {
+			time.Sleep(100 * time.Millisecond) // Give time for the confirmation message to be sent
+			if c.conn != nil {
+				c.conn.Close()
+			}
+		}()
+		break
 	}
 }
 

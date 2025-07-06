@@ -1052,6 +1052,44 @@ const GameRoom = () => {
     };
   }, [socketService]); // Depend only on socketService instance
 
+  // Cleanup effect - handle leaving game when component unmounts or navigating away
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      // Send leave_game message when page is being unloaded
+      if (socketService && currentPlayerId && roomId) {
+        socketService.leaveGame();
+      }
+    };
+
+    // Add event listener for page unload
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    // Cleanup function - called when component unmounts or dependencies change
+    return () => {
+      // Remove event listener
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      
+      // Send leave_game message when navigating away from GameRoom
+      if (socketService && currentPlayerId && roomId) {
+        console.log(`[GameRoom Cleanup] Player ${currentPlayerId} leaving game ${roomId}`);
+        socketService.leaveGame();
+      }
+    };
+  }, [socketService, currentPlayerId, roomId]); // Dependencies ensure cleanup runs when these change
+
+  // Send leave_game message on unmount or navigation
+  useEffect(() => {
+    return () => {
+      if (socketService && socketService.socket && socketService.socket.readyState === WebSocket.OPEN) {
+        const playerId = localStorage.getItem(`kekopoly_player_${roomId}`) || currentPlayerId;
+        socketService.sendMessage('leave_game', {
+          gameId: roomId,
+          playerId: playerId
+        });
+      }
+    };
+  }, [roomId, currentPlayerId, socketService]);
+
   // Handle player registration
   const handleRegisterPlayer = async () => {
     if (!playerName.trim()) {
@@ -1912,7 +1950,7 @@ const GameRoom = () => {
               p={6}
               borderRadius="md"
               boxShadow="md"
-            >
+                       >
               <VStack align="stretch" spacing={5}>
                 <Heading size="md">Game Setup</Heading>
 
@@ -1927,66 +1965,55 @@ const GameRoom = () => {
                       {gamePhase === 'setup' ? 'Waiting for players' : 'Game ready to start'}
                     </AlertTitle>
                     <AlertDescription>
-                      {readyPlayersCount} of {players.length} players ready
+                      {gamePhase === 'setup' ? 'Join the game and get ready!' : 'All players are ready!'}
                     </AlertDescription>
                   </Box>
                 </Alert>
 
-                {/* Join/Ready Controls */}
-                {!isRegistered ? (
+                {/* Ready Button */}
+                {isRegistered && (
                   <Button
-                    colorScheme="blue"
+                    colorScheme={currentPlayer?.isReady ? "red" : "green"}
                     size="lg"
-                    onClick={onOpen}
-                    isDisabled={isRoomFull}
-                    leftIcon={<FaUserEdit />}
-                    width="full"
+                    onClick={handleToggleReady}
+                    leftIcon={currentPlayer?.isReady ? <FaUserEdit /> : <FaUserCheck />}
+                    isLoading={isReadyLoading}
+                    loadingText={currentPlayer?.isReady ? "Canceling..." : "Getting ready..."}
                   >
-                    {isRoomFull ? "Room is Full" : "Join Game"}
+                    {currentPlayer?.isReady ? "Cancel Ready" : "Ready Up"}
                   </Button>
-                ) : (
-                  <VStack spacing={3} align="stretch">
+                )}
+
+                {/* Start Game Button - Only for host */}
+                {isHost && (
+                  <VStack spacing={2} align="stretch">
                     <Button
-                      colorScheme={currentPlayer?.isReady ? "gray" : "green"}
+                      colorScheme="green"
                       size="lg"
-                      onClick={handleToggleReady}
-                      leftIcon={<FaUserCheck />}
+                      isDisabled={!allPlayersReady || players.length < 2}
+                      onClick={handleStartGame}
+                      isLoading={loading}
+                      leftIcon={<FaPlay />}
+                      mt={4}
                       width="full"
                     >
-                      {currentPlayer?.isReady ? "Cancel Ready" : "Ready Up"}
+                      {allPlayersReady && players.length >= 2 ? "Start Game" : "Waiting for players to ready up"}
                     </Button>
+                    <Badge colorScheme="purple" p={2} textAlign="center">
+                      You are the host of this game
+                    </Badge>
+                  </VStack>
+                )}
 
-
-
-                    {isHost ? (
-                      <VStack spacing={2} align="stretch">
-                        <Button
-                          colorScheme="green"
-                          size="lg"
-                          isDisabled={!allPlayersReady || players.length < 2}
-                          onClick={handleStartGame}
-                          isLoading={loading}
-                          leftIcon={<FaPlay />}
-                          mt={4}
-                          width="full"
-                        >
-                          {allPlayersReady && players.length >= 2 ? "Start Game" : "Waiting for players to ready up"}
-                        </Button>
-                        <Badge colorScheme="purple" p={2} textAlign="center">
-                          You are the host of this game
-                        </Badge>
-                      </VStack>
-                    ) : (
-                      <VStack spacing={2} align="stretch">
-                        <Text color="gray.500" mt={4} textAlign="center">
-                          Waiting for host to start the game...
-                        </Text>
-                        <Text fontSize="sm" color="gray.400" textAlign="center">
-
-                          Only the host ({getHostName()}) can start the game
-                        </Text>
-                      </VStack>
-                    )}
+                {/* Non-host waiting message */}
+                {!isHost && isRegistered && (
+                  <VStack spacing={2} align="stretch">
+                    <Text color="gray.500" mt={4} textAlign="center">
+                      Waiting for host to start the game...
+                    </Text>
+                    <Text fontSize="sm" color="gray.400" textAlign="center">
+                      Only the host ({getHostName()}) can start the game
+                    </Text>
                   </VStack>
                 )}
 
