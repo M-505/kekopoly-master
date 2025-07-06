@@ -210,6 +210,7 @@ const GameRoom = () => {
   const [isJoining, setIsJoining] = useState(false);
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
+  const [isReadyLoading, setIsReadyLoading] = useState(false);
 
 
 
@@ -591,7 +592,7 @@ const GameRoom = () => {
         console.log(`[ROOM_VALIDATION] Game ${roomId} is joinable with status: ${currentStatus}`);
         
         // Store room data in Redux for use by other components
-        if (gameData.code && gameData.code !== roomId) {
+        if (gameData.code && gameData.code.toUpperCase() !== roomId.toUpperCase()) {
           console.log(`[ROOM_VALIDATION] Room code mismatch detected. URL: ${roomId}, Actual: ${gameData.code}`);
           
           // Show warning about room code mismatch but don't redirect
@@ -1320,6 +1321,15 @@ const GameRoom = () => {
       return;
     }
 
+    // Prevent multiple simultaneous toggle attempts
+    if (isReadyLoading) {
+      console.log('Toggle ready already in progress, skipping...');
+      return;
+    }
+
+    // Set loading state
+    setIsReadyLoading(true);
+
     // Toggle ready status
     const isCurrentlyReady = currentPlayer?.isReady || false;
     const newReadyStatus = !isCurrentlyReady;
@@ -1375,6 +1385,11 @@ const GameRoom = () => {
     } catch (err) {
       // Ignore broadcast channel errors, they're not critical
     }
+
+    // Reset loading state after a reasonable timeout
+    setTimeout(() => {
+      setIsReadyLoading(false);
+    }, 2000);
   };
 
   // Handle game start (host only)

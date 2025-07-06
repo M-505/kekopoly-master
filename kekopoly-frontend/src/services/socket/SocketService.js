@@ -85,6 +85,7 @@ class SocketService {
     this.handleMessage = messageHandlers.handleMessage.bind(this);
     this.sendMessage = messageHandlers.sendMessage.bind(this);
     this.sendQueuedMessages = messageHandlers.sendQueuedMessages.bind(this);
+    this.queueMessage = messageHandlers.queueMessage.bind(this);
 
     // Bind lobby handlers
     this.connectToLobby = lobbyHandlers.connectToLobby.bind(this);
