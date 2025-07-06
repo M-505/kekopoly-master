@@ -54,7 +54,7 @@ export function handleActivePlayers(data) {
  * @param {Object} player - The player data
  */
 export function handlePlayerJoined(player) {
-  const { dispatch } = store;
+  const { dispatch, getState } = store;
 
   if (!player || !player.id) {
     logWarning('PLAYER', 'Received player_joined event with invalid player data');
@@ -63,11 +63,19 @@ export function handlePlayerJoined(player) {
 
   log('PLAYER', `Player joined: ${player.id} (${player.name})`);
 
-  // Add player to Redux store
-  dispatch(addPlayer({
-    playerId: player.id,
-    playerData: player
-  }));
+  // It's better to request a full list to ensure synchronization
+  // This avoids race conditions where clients have different player lists.
+  const { socketService } = getState().game;
+  if (socketService) {
+    log('PLAYER', 'Requesting active players to ensure sync after a player joined.');
+    socketService.sendMessage('get_active_players', {});
+  } else {
+    // Fallback to adding the player directly if socketService is not available
+    dispatch(addPlayer({
+      playerId: player.id,
+      playerData: player
+    }));
+  }
 }
 
 /**
